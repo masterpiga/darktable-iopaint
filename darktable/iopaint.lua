@@ -43,6 +43,17 @@ local PS = OS == "windows" and "\\" or "/"
 -- simple no-op translation wrapper (keeps strings greppable / future-proof)
 local function _(s) return s end
 
+-- Absolute path of the repository this script lives in (…/<repo>/darktable/iopaint.lua).
+-- Used as the default "source checkout" so a normal install needs no manual configuration.
+local function detect_repo()
+  local src = debug.getinfo(1, "S").source
+  if src:sub(1, 1) == "@" then src = src:sub(2) end
+  local dir = src:match("^(.*)[/\\][^/\\]+$")    -- .../<repo>/darktable
+  if not dir then return "" end
+  return dir:match("^(.*)[/\\][^/\\]+$") or ""   -- .../<repo>
+end
+local DETECTED_REPO = detect_repo()
+
 -- ---------------------------------------------------------------------------
 -- preferences
 -- ---------------------------------------------------------------------------
@@ -63,9 +74,9 @@ dt.preferences.register(MODULE, "port", "integer",
   0, 0, 65535)
 dt.preferences.register(MODULE, "iopaint_repo", "string",
   _("IOPaint: source checkout (this fork)"),
-  _("path to a clone of this patched IOPaint fork. The server is run from its virtualenv "
-    .."(.venv) - run darktable/setup.sh once to create it. The web frontend is built "
-    .."automatically on first use."), "")
+  _("path to a clone of this patched IOPaint fork. Leave empty to auto-detect the folder this "
+    .."script lives in. The server runs from its virtualenv (.venv) - run darktable/setup.sh "
+    .."once to create it."), "")
 dt.preferences.register(MODULE, "model", "string",
   _("IOPaint: model"),
   _("model to load, e.g. lama"), "lama")
@@ -81,6 +92,13 @@ dt.preferences.register(MODULE, "disconnect_debounce", "integer",
 
 local function read_pref(key)
   return dt.preferences.read(MODULE, key, PREF_TYPES[key])
+end
+
+-- the configured source checkout, or the auto-detected one when the pref is empty
+local function repo_path()
+  local p = read_pref("iopaint_repo")
+  if p ~= nil and p ~= "" then return p end
+  return DETECTED_REPO
 end
 
 -- ---------------------------------------------------------------------------
@@ -253,10 +271,10 @@ end
 
 -- returns true if the launch was issued, false on a (reported) failure
 local function start_server()
-  local repo = read_pref("iopaint_repo") or ""
+  local repo = repo_path() or ""
   if repo == "" then
-    dt.print(_("IOPaint: set the 'source checkout' preference to your IOPaint clone, then run "
-      .."darktable/setup.sh in it"))
+    dt.print(_("IOPaint: could not locate the source checkout - set the 'source checkout' "
+      .."preference to your darktable-iopaint clone, then run darktable/setup.sh in it"))
     return false
   end
 

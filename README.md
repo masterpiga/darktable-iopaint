@@ -39,7 +39,34 @@ shortcuts (*IOPaint: send selection* / *IOPaint: import results*) can be bound u
 - **Node.js / npm** (used once by `setup.sh` to build the web frontend).
 - darktable with Lua support (Lua API ≥ 7.0.0).
 
-## Setup (clone and run)
+## Quick install (recommended)
+
+One command clones this fork, builds it (virtualenv + dependencies + web frontend),
+wires the script into darktable, and (optionally) pre-downloads the model — then just
+start darktable.
+
+**macOS / Linux**
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/masterpiga/darktable-iopaint/main/install.sh | bash
+```
+
+**Windows (PowerShell)**
+
+```powershell
+irm https://raw.githubusercontent.com/masterpiga/darktable-iopaint/main/install.ps1 | iex
+```
+
+It asks where to install and for your darktable config directory (sensible defaults
+offered), then does everything and registers the script with darktable's **lua scripts**
+panel. On next launch, enable **iopaint** (under `contrib`) in that panel — the **IOPaint**
+module then appears in lighttable and darkroom.
+
+(Prerequisites: `git`, `node`/`npm`, and a Python 3.8–3.11.)
+
+To set things up by hand instead, see **Manual setup** below.
+
+## Manual setup
 
 1. Clone this fork and run the setup script. It creates a virtualenv (`.venv` in the
    checkout), installs IOPaint (this fork) into it, and builds the web frontend:
