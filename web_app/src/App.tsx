@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef } from "react"
 
 import useInputImage from "@/hooks/useInputImage"
 import { keepGUIAlive } from "@/lib/utils"
-import { getServerConfig } from "@/lib/api"
+import { getMediaFile, getMedias, getServerConfig } from "@/lib/api"
 import Header from "@/components/Header"
 import Workspace from "@/components/Workspace"
 import FileSelect from "@/components/FileSelect"
@@ -46,6 +46,20 @@ function Home() {
       if (serverConfig.isDesktop) {
         // Keeping GUI Window Open
         keepGUIAlive()
+      }
+      // When running with a file browser (e.g. the darktable integration), preload
+      // the first input image so a single-image session opens ready to edit instead
+      // of requiring the user to open the file browser first.
+      if (serverConfig.enableFileManager) {
+        try {
+          const medias = await getMedias("input")
+          if (medias.length > 0) {
+            const f = await getMediaFile("input", medias[0].name)
+            setFile(f)
+          }
+        } catch (e) {
+          // ignore: the user can still pick an image from the file browser
+        }
       }
     }
     fetchServerConfig()

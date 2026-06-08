@@ -151,6 +151,7 @@ class Api:
         self.config = config
         self.router = APIRouter()
         self.queue_lock = threading.Lock()
+        self.connected_clients = set()
         api_middleware(self.app)
 
         self.file_manager = self._build_file_manager()
@@ -171,6 +172,7 @@ class Api:
         self.add_api_route("/api/v1/samplers", self.api_samplers, methods=["GET"])
         self.add_api_route("/api/v1/adjust_mask", self.api_adjust_mask, methods=["POST"])
         self.add_api_route("/api/v1/save_image", self.api_save_image, methods=["POST"])
+        self.add_api_route("/api/v1/connected_clients", self.api_connected_clients, methods=["GET"])
         self.app.mount("/", StaticFiles(directory=WEB_APP_DIR, html=True), name="assets")
         # fmt: on
 
@@ -179,6 +181,14 @@ class Api:
         self.combined_asgi_app = socketio.ASGIApp(self.sio, self.app)
         self.app.mount("/ws", self.combined_asgi_app)
         global_sio = self.sio
+
+        @self.sio.on("connect")
+        async def _on_connect(sid, environ, auth=None):
+            self.connected_clients.add(sid)
+
+        @self.sio.on("disconnect")
+        async def _on_disconnect(sid):
+            self.connected_clients.discard(sid)
 
     def add_api_route(self, path: str, endpoint, **kwargs):
         return self.app.add_api_route(path, endpoint, **kwargs)
@@ -201,6 +211,12 @@ class Api:
         origin_image_bytes = file.file.read()
         with open(output_path, "wb") as fw:
             fw.write(origin_image_bytes)
+
+    def api_connected_clients(self):
+        # Number of web clients currently connected via Socket.IO. Used by external
+        # tooling (e.g. the darktable integration) to detect when an editing session
+        # has started and ended.
+        return {"count": len(self.connected_clients)}
 
     def api_current_model(self) -> ModelInfo:
         return self.model_manager.current_model
