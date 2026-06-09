@@ -39,7 +39,8 @@ $Predownload= if ($env:IOPAINT_DT_PREDOWNLOAD) { $env:IOPAINT_DT_PREDOWNLOAD } e
 
 # find a supported Python (3.8-3.11)
 function Find-Python {
-  foreach ($v in @("3.11","3.10","3.9","3.8")) {
+  $supported = @("3.9","3.10","3.11","3.12","3.13","3.14")
+  foreach ($v in @("3.12","3.13","3.14","3.11","3.10","3.9")) {
     if (Get-Command py -ErrorAction SilentlyContinue) {
       & py "-$v" --version *> $null
       if ($LASTEXITCODE -eq 0) { return @("py", "-$v") }
@@ -47,9 +48,9 @@ function Find-Python {
   }
   if (Get-Command python -ErrorAction SilentlyContinue) {
     $ver = (& python -c "import sys;print('%d.%d'%sys.version_info[:2])")
-    if ($ver -in @("3.8","3.9","3.10","3.11")) { return @("python") }
+    if ($ver -in $supported) { return @("python") }
   }
-  Die "no supported Python found (need 3.8-3.11). Install Python 3.11 from python.org and retry."
+  Die "no supported Python found (need 3.9-3.14). Install Python 3.12 from python.org and retry."
 }
 
 # 1. clone or update

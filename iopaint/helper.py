@@ -1,5 +1,4 @@
 import base64
-import imghdr
 import io
 import os
 import sys
@@ -298,10 +297,14 @@ def is_mac():
 
 
 def get_image_ext(img_bytes):
-    w = imghdr.what("", img_bytes)
-    if w is None:
-        w = "jpeg"
-    return w
+    # Detect the image format from its bytes using Pillow (the stdlib `imghdr`
+    # module was removed in Python 3.13). Falls back to "jpeg" like before.
+    try:
+        with Image.open(io.BytesIO(img_bytes)) as img:
+            fmt = (img.format or "").lower()
+    except Exception:
+        fmt = ""
+    return fmt or "jpeg"
 
 
 def decode_base64_to_image(

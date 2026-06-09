@@ -22,23 +22,25 @@ VENV_DIR="${1:-$REPO_ROOT/.venv}"
 # Python 3.8-3.11; newer interpreters try to build from source and fail. Pick a
 # supported interpreter rather than whatever `python3` happens to be.
 pyver() { "$1" -c 'import sys;print("%d.%d"%sys.version_info[:2])' 2>/dev/null; }
-supported_version() { case "$1" in 3.8|3.9|3.10|3.11) return 0;; *) return 1;; esac; }
+# Supported range: 3.9-3.14 (some pinned deps lack wheels for very new Pythons).
+supported_version() { case "$1" in 3.9|3.10|3.11|3.12|3.13|3.14) return 0;; *) return 1;; esac; }
 
 pick_python() {
   if [ -n "${PYTHON:-}" ]; then
     command -v "$PYTHON" >/dev/null 2>&1 || { echo "error: PYTHON='$PYTHON' not found on PATH." >&2; return 1; }
     if ! supported_version "$(pyver "$PYTHON")"; then
-      echo "error: PYTHON='$PYTHON' is Python $(pyver "$PYTHON"); IOPaint needs 3.8-3.11." >&2; return 1
+      echo "error: PYTHON='$PYTHON' is Python $(pyver "$PYTHON"); IOPaint needs 3.9-3.14." >&2; return 1
     fi
     echo "$PYTHON"; return 0
   fi
-  for cand in python3.11 python3.10 python3.9 python3.8; do
+  # prefer the plain 'python3' if it's in range, then newest-to-oldest
+  for cand in python3 python3.14 python3.13 python3.12 python3.11 python3.10 python3.9; do
     if command -v "$cand" >/dev/null 2>&1 && supported_version "$(pyver "$cand")"; then
       echo "$cand"; return 0
     fi
   done
-  echo "error: no supported Python found (need 3.8-3.11)." >&2
-  echo "       Install one (e.g. 'brew install python@3.11') or set PYTHON=/path/to/python3.11." >&2
+  echo "error: no supported Python found (need 3.9-3.14)." >&2
+  echo "       Install one (e.g. 'brew install python@3.12') or set PYTHON=/path/to/python3." >&2
   return 1
 }
 

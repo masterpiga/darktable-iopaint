@@ -51,7 +51,7 @@ can be bound under `settings > shortcuts > lua`.
 **Prerequisites:**
 * `darktable` with Lua Api >= `7.0.0`
 * `node`/`npm`
-* A Python version between 3.8 and 3.11.
+* Python 3.9–3.14.
 
 One command clones this fork, builds it (virtualenv + dependencies + web frontend),
 wires the script into darktable, and (optionally) pre-downloads the model.
@@ -90,7 +90,7 @@ If you prefer to set things up by hand instead (or for whatever reason the quick
    ./darktable/setup.sh
    ```
 
-   `setup.sh` picks a supported Python (3.8–3.11; override with `PYTHON=/path/to/python3.11`)
+   `setup.sh` picks a supported Python (3.9–3.14; override with `PYTHON=/path/to/python3`)
    and prints the **source checkout** path to set in the preferences below.
 
 2. Quit darktable if running already.
