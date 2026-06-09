@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (C) 2026 Daniele Pighin
 #
 # One-line installer for the darktable -> IOPaint integration (macOS / Linux).
 #
@@ -41,6 +43,7 @@ prompt() {
 }
 
 say "darktable-iopaint installer"
+warn "Experimental software - use at your own risk. Tested only on macOS."
 need git
 
 INSTALL_DIR="${IOPAINT_DT_INSTALL_DIR:-}"

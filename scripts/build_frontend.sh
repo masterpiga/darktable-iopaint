@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (C) 2026 Daniele Pighin
 #
 # Build the IOPaint web frontend and copy it into iopaint/web_app.
 #

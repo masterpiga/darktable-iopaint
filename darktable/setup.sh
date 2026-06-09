@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (C) 2026 Daniele Pighin
 #
 # One-step setup for the darktable -> IOPaint integration.
 #

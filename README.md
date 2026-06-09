@@ -9,6 +9,15 @@ See the original [IOPaint](https://github.com/Sanster/IOPaint) repository for th
 
 Co-authored with Claude and Gemini.
 
+## Important notice
+
+> ⚠️ **Experimental software — use at your own risk.** The lua script starts background
+> processes, exports/imports files next to your originals, and modifies the darktable
+> database. It comes with **no warranty** (see the License). Back up your work first.
+> It has been **tested only on macOS**; the Linux and Windows paths are provided as-is and
+> may not work.
+
+
 ## Demo
 
 https://github.com/user-attachments/assets/37acc48b-426d-48a3-9ce7-6a32db68d66d
@@ -121,6 +130,11 @@ Images are exported as 8-bit PNG: IOPaint and the LaMa model work in 8-bit RGB t
 (input is converted to 8-bit on load, and the browser editor composites on an 8-bit canvas),
 so a deeper export would just be downconverted with no quality gain.
 
+> **Note on models:** model weights are licensed separately from this code and are downloaded
+> at runtime under their own terms. The default **lama** is Apache-2.0. Other models IOPaint
+> can fetch may be more restrictive — e.g. the RemoveBG model `briaai/RMBG-1.4` is for
+> **non-commercial use only**. Check the license of any model you enable before relying on it.
+
 ## How it works (and limitations)
 
 - The script manages **its own IOPaint instance** on a dedicated port (default **8418**),
@@ -160,3 +174,20 @@ auto-saving) are standard IOPaint features and are set automatically by this scr
 The frontend build step is `scripts/build_frontend.sh` (`npm run build` in `web_app/`, copied
 into `iopaint/web_app/`). `setup.sh` runs it during setup; the darktable script also runs it on
 first launch as a fallback if the build is missing.
+
+## License
+
+This repository combines two parts under different licenses:
+
+- The **upstream IOPaint** code (the `iopaint/` package, `web_app/`, `setup.py`, etc.),
+  including modifications made here, remains under the **Apache License 2.0** — see
+  [`LICENSE`](LICENSE). Modified upstream files (notably `iopaint/api.py`) are noted in
+  [`NOTICE`](NOTICE) per Apache-2.0 §4.
+- The **darktable integration** added by this project — `darktable/iopaint.lua`,
+  `darktable/setup.sh`, `scripts/build_frontend.sh`, `install.sh`, `install.ps1` — is licensed
+  under the **GNU General Public License v3.0 or later** (to match darktable) — see
+  [`darktable/LICENSE`](darktable/LICENSE). Each file carries an SPDX header.
+
+Model weights are licensed separately and under their own terms (see the note above).
+
+This is a summary, not legal advice.

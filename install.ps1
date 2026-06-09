@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (C) 2026 Daniele Pighin
+#
 # One-line installer for the darktable -> IOPaint integration (Windows).
 #
 #   irm https://raw.githubusercontent.com/masterpiga/darktable-iopaint/main/install.ps1 | iex
@@ -26,6 +29,7 @@ $DefaultInstall = Join-Path $env:LOCALAPPDATA "darktable-iopaint"
 $DefaultConfig  = Join-Path $env:LOCALAPPDATA "darktable"
 
 Say "darktable-iopaint installer"
+Write-Host "Experimental software - use at your own risk. Tested only on macOS." -ForegroundColor Yellow
 Need git
 Need npm
 

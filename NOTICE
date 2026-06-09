@@ -1,0 +1,37 @@
+darktable-iopaint
+=================
+
+This project is built on IOPaint (https://github.com/Sanster/IOPaint),
+Copyright (c) the IOPaint authors, licensed under the Apache License, Version 2.0.
+A copy of the Apache License is in ./LICENSE.
+
+License structure
+-----------------
+
+* The upstream IOPaint code (the `iopaint/` package, `web_app/`, `setup.py`,
+  and other base files) remains licensed under Apache-2.0. Some of these files
+  have been modified for the darktable integration (notably `iopaint/api.py`,
+  which adds the `/api/v1/connected_clients` endpoint); per Apache-2.0 section 4,
+  such modifications are noted here and recorded in the project's git history.
+
+* The darktable integration added by this project is licensed under the GNU
+  General Public License, version 3 or later (GPL-3.0-or-later), to match
+  darktable. A copy is in ./darktable/LICENSE. This covers:
+    - darktable/iopaint.lua
+    - darktable/setup.sh
+    - scripts/build_frontend.sh
+    - install.sh
+    - install.ps1
+
+Each integration file carries an SPDX-License-Identifier header.
+
+Models
+------
+
+Model weights are licensed separately from this code and are downloaded at
+runtime under their own terms. The default model, LaMa, is Apache-2.0. Other
+models IOPaint can fetch may be more restrictive — for example the RemoveBG
+model `briaai/RMBG-1.4` is released for non-commercial use only. Review the
+license of any model you enable before relying on its output.
+
+See the "License" section of README.md for a summary.

@@ -1,3 +1,5 @@
+-- SPDX-License-Identifier: GPL-3.0-or-later
+-- Copyright (C) 2026 Daniele Pighin
 --[[
   iopaint.lua - drive IOPaint (https://github.com/Sanster/IOPaint) from darktable.
 
