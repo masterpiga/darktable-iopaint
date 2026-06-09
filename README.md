@@ -9,6 +9,10 @@ See the original [IOPaint](https://github.com/Sanster/IOPaint) repository for th
 
 Co-authored with Claude and Gemini.
 
+## Demo
+
+https://github.com/user-attachments/assets/37acc48b-426d-48a3-9ce7-6a32db68d66d
+
 ## What it does
 
 1. **Send selection to IOPaint** — exports the selected images (current image in darkroom)
