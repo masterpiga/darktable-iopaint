@@ -87,7 +87,8 @@ dt.preferences.register(MODULE, "extra_args", "string",
   _("extra arguments appended to 'iopaint start' (advanced)"), "")
 dt.preferences.register(MODULE, "disconnect_debounce", "integer",
   _("IOPaint: disconnect debounce (seconds)"),
-  _("how long the browser must stay closed before results are imported"), 8, 1, 120)
+  _("how long the browser must stay closed before results are imported. Small values import "
+    .."sooner; raise it if a page reload is mistaken for closing the tab."), 2, 1, 30)
 
 local function read_pref(key)
   return dt.preferences.read(MODULE, key, PREF_TYPES[key])
@@ -393,30 +394,37 @@ end
 -- session monitor (web-client lifecycle)
 -- ---------------------------------------------------------------------------
 
+local MONITOR_SLOW_MS = 1000   -- poll interval while a client is connected (editing)
+local MONITOR_FAST_MS = 250    -- poll interval while watching a possible disconnect
+
 local function monitor_and_import()
-  local debounce = read_pref("disconnect_debounce")
+  -- debounce absorbs a page reload (a brief disconnect+reconnect) without importing
+  local debounce_ms = (read_pref("disconnect_debounce") or 2) * 1000
   local connected_ever = false
-  local zero_since = nil
-  local started = os.time()
+  local zero_ms = nil          -- ms observed at zero clients since a possible disconnect
+  local waited = 0             -- ms spent waiting for the first connection
 
   while true do
     local n = get_client_count()
     if n == nil then
-      -- server unreachable: if a session had started, treat it as ended
-      if connected_ever then break end
+      if connected_ever then break end          -- server gone -> session over
     elseif n > 0 then
       connected_ever = true
-      zero_since = nil
-    else -- n == 0
-      if connected_ever then
-        zero_since = zero_since or os.time()
-        if os.time() - zero_since >= debounce then break end
-      elseif os.time() - started > 180 then
-        dt.print(_("IOPaint: no browser connected, stopped watching (use 'import results' when done)"))
-        return
-      end
+      zero_ms = nil                              -- (re)connected: cancel the timer
+    elseif connected_ever then                   -- n == 0 after having connected
+      zero_ms = zero_ms or 0
+      if zero_ms >= debounce_ms then break end
+    elseif waited > 180000 then                  -- never connected
+      dt.print(_("IOPaint: no browser connected, stopped watching (use 'import results' when done)"))
+      return
     end
-    dt.control.sleep(2000)
+
+    -- poll fast only while a disconnect is in progress; slow the rest of the time
+    local watching = connected_ever and zero_ms ~= nil
+    local interval = watching and MONITOR_FAST_MS or MONITOR_SLOW_MS
+    dt.control.sleep(interval)
+    if watching then zero_ms = zero_ms + interval end
+    if not connected_ever then waited = waited + interval end
   end
 
   import_results()

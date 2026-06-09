@@ -111,7 +111,7 @@ Under `settings > lua options` (namespace **iopaint**):
 | model | `lama` | IOPaint model to load. |
 | result suffix | `_iopaint` | Appended to the imported filename before the extension. |
 | extra server arguments | *(empty)* | Appended verbatim to `iopaint start` (advanced, e.g. `--device cuda`). |
-| disconnect debounce (seconds) | `8` | How long the browser must stay closed before importing (absorbs page reloads / blips). |
+| disconnect debounce (seconds) | `2` | How long the browser must stay closed before importing (absorbs page reloads / blips). Lower = imports sooner. |
 
 Images are exported as 8-bit PNG: IOPaint and the LaMa model work in 8-bit RGB throughout
 (input is converted to 8-bit on load, and the browser editor composites on an 8-bit canvas),
