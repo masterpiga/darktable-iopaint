@@ -67,13 +67,35 @@ fi
 VENV_PY="$VENV_DIR/bin/python"
 [ -x "$VENV_PY" ] || VENV_PY="$VENV_DIR/Scripts/python.exe"  # Windows (git-bash)
 
-# 2. dependencies (this can take a while - it pulls torch etc.)
+# 2. make sure pip exists in the venv. On Debian/Ubuntu the venv is often created
+# without pip because ensurepip's bundled wheels live in a separate apt package
+# (pythonX.Y-venv). Bootstrap it via ensurepip, then get-pip.py, before using it.
+if ! "$VENV_PY" -m pip --version >/dev/null 2>&1; then
+  echo "pip not found in the virtualenv; bootstrapping..."
+  "$VENV_PY" -m ensurepip --upgrade >/dev/null 2>&1 || true
+fi
+if ! "$VENV_PY" -m pip --version >/dev/null 2>&1; then
+  if command -v curl >/dev/null 2>&1; then
+    curl -fsSL https://bootstrap.pypa.io/get-pip.py | "$VENV_PY" - >/dev/null 2>&1 || true
+  elif command -v wget >/dev/null 2>&1; then
+    wget -qO- https://bootstrap.pypa.io/get-pip.py | "$VENV_PY" - >/dev/null 2>&1 || true
+  fi
+fi
+if ! "$VENV_PY" -m pip --version >/dev/null 2>&1; then
+  echo "error: pip is unavailable in $VENV_DIR and could not be bootstrapped." >&2
+  echo "       On Debian/Ubuntu, install the venv package and retry:" >&2
+  echo "         sudo apt install python3-venv python$(pyver "$VENV_PY")-venv" >&2
+  echo "       then delete '$VENV_DIR' and run this again." >&2
+  exit 1
+fi
+
+# 3. dependencies (this can take a while - it pulls torch etc.)
 echo "Upgrading pip..."
 "$VENV_PY" -m pip install --upgrade pip >/dev/null
 echo "Installing IOPaint (this fork) and its dependencies..."
 "$VENV_PY" -m pip install -e "$REPO_ROOT"
 
-# 3. frontend
+# 4. frontend
 if command -v npm >/dev/null 2>&1; then
   echo "Building web frontend..."
   "$REPO_ROOT/scripts/build_frontend.sh"
