@@ -69,9 +69,8 @@ local PREF_TYPES = {
 
 dt.preferences.register(MODULE, "port", "integer",
   _("IOPaint: server port"),
-  _("port for the IOPaint server this script manages. 0 = auto-select a free port (default); "
-    .."set a specific port if you need one. Keep it distinct from any IOPaint you run manually."),
-  0, 0, 65535)
+  _("port for the IOPaint server this script manages. Keep it distinct from any IOPaint you "
+    .."run manually (don't use 8080)."), 8418, 1, 65535)
 dt.preferences.register(MODULE, "iopaint_repo", "string",
   _("IOPaint: source checkout (this fork)"),
   _("path to a clone of this patched IOPaint fork. Leave empty to auto-detect the folder this "
@@ -94,10 +93,16 @@ local function read_pref(key)
   return dt.preferences.read(MODULE, key, PREF_TYPES[key])
 end
 
--- the configured source checkout, or the auto-detected one when the pref is empty
+-- the source checkout to run from: the configured preference if it points at a
+-- valid checkout, otherwise the auto-detected location. Falling back keeps a stale
+-- preference (e.g. an old path after moving/renaming the repo) from breaking things.
 local function repo_path()
   local p = read_pref("iopaint_repo")
-  if p ~= nil and p ~= "" then return p end
+  if p ~= nil and p ~= "" then
+    if df.check_if_file_exists(p..PS.."darktable"..PS.."iopaint.lua") then return p end
+    dt.print_error("[iopaint] configured source checkout '"..p..
+      "' looks invalid; using auto-detected '"..DETECTED_REPO.."'")
+  end
   return DETECTED_REPO
 end
 
@@ -153,7 +158,7 @@ local function clear_dir(dir)
   end
 end
 
--- the port the current session settled on (resolved per send; see resolve_port)
+-- the port the current session is using (read from the preference at send time)
 local active_port = nil
 
 local function http_body(path, port)
@@ -179,8 +184,13 @@ end
 local function server_usable(port)
   local out = http_body("/api/v1/server-config", port)
   if out == nil then return false end
-  return out:match('"enableAutoSaving"%s*:%s*true') ~= nil
-     and out:match('"enableFileManager"%s*:%s*true') ~= nil
+  if out:match('"enableAutoSaving"%s*:%s*true') == nil then return false end
+  if out:match('"enableFileManager"%s*:%s*true') == nil then return false end
+  -- also confirm the UI itself is served: a server whose static dir vanished
+  -- (e.g. the checkout was moved/renamed) answers the API but 404s the root,
+  -- which would otherwise be reused and open an empty page.
+  local root = http_body("/", port)
+  return root ~= nil and root:match("^%s*<") ~= nil
 end
 
 -- returns number of connected web clients, or nil if the server is unreachable
@@ -198,29 +208,39 @@ local function clients_endpoint_ok(port)
   return out ~= nil and out:match('"count"') ~= nil
 end
 
--- pick the port to use this session, honoring the preference (0 = auto-select).
--- returns: port (or nil), already_ours (bool), errmsg (string or nil)
-local PORT_RANGE_LO, PORT_RANGE_HI = 8418, 8438
-local function resolve_port()
-  local configured = read_pref("port")
-  if configured ~= 0 then
-    if is_server_running(configured) then
-      if server_usable(configured) then return configured, true, nil end
-      return nil, false, string.format(_("a different IOPaint server is already running on port "
-        .."%d (no file browser / auto-save). Stop it, change the port, or set the port to 0 for "
-        .."auto-select."), configured)
-    end
-    return configured, false, nil
+-- the "stop server" button (forward-declared so refresh_stop_button can toggle it)
+local button_stop = nil
+
+-- enable the stop button only while a server is running on the configured port
+local function refresh_stop_button()
+  if button_stop then button_stop.sensitive = is_server_running(read_pref("port")) end
+end
+
+-- stop the IOPaint server this script manages (kills whatever listens on the port)
+local function stop_server()
+  local port = read_pref("port")
+  if not is_server_running(port) then
+    dt.print(string.format(_("IOPaint: no server running on port %d"), port))
+    refresh_stop_button()
+    return
   end
-  -- auto: reuse one of our usable servers if present, else first free port in range
-  for p = PORT_RANGE_LO, PORT_RANGE_HI do
-    if server_usable(p) then return p, true, nil end
+  local cmd
+  if OS == "windows" then
+    cmd = string.format('powershell -NoProfile -Command "Get-NetTCPConnection -LocalPort %d '
+      .."-State Listen -ErrorAction SilentlyContinue | ForEach-Object { Stop-Process -Id "
+      .."$_.OwningProcess -Force }\"", port)
+  else
+    cmd = string.format("lsof -ti tcp:%d -sTCP:LISTEN 2>/dev/null | xargs kill 2>/dev/null", port)
   end
-  for p = PORT_RANGE_LO, PORT_RANGE_HI do
-    if not is_server_running(p) then return p, false, nil end
+  log("stopping server: "..cmd)
+  os.execute(cmd)
+  dt.control.sleep(1000)
+  if is_server_running(port) then
+    dt.print(string.format(_("IOPaint: could not stop the server on port %d"), port))
+  else
+    dt.print(_("IOPaint: server stopped"))
   end
-  return nil, false, string.format(_("no free port found in %d-%d; stop some servers or set a "
-    .."specific port"), PORT_RANGE_LO, PORT_RANGE_HI)
+  refresh_stop_button()
 end
 
 local function open_url(url)
@@ -425,14 +445,16 @@ local function send_to_iopaint()
   dt.control.sleep(50)
 
   local ok, err = pcall(function()
-    -- decide which port to use (pref, or auto-select when it is 0)
-    local port, already, perr = resolve_port()
-    if not port then
-      dt.print(_("IOPaint: ")..perr)
+    active_port = read_pref("port")
+
+    -- check what (if anything) is already on the configured port
+    local already = is_server_running(active_port)
+    if already and not server_usable(active_port) then
+      dt.print(string.format(_("IOPaint: a different server is already running on port %d "
+        .."(no file browser / auto-save, or its UI is gone). Stop it or change the 'server "
+        .."port' preference."), active_port))
       return
     end
-    active_port = port
-
     -- when reusing our own running server, don't clobber an open browser session
     if already then
       local n = get_client_count()
@@ -486,6 +508,7 @@ local function send_to_iopaint()
         return
       end
     end
+    refresh_stop_button()  -- a server is now running
     job.percent = 0.6
 
     open_url(string.format("http://127.0.0.1:%d", active_port))
@@ -530,12 +553,6 @@ end
 -- UI registration
 -- ---------------------------------------------------------------------------
 
-local button_send = dt.new_widget("button") {
-  label = _("send selection to IOPaint"),
-  tooltip = _("export the selected images and open them in IOPaint"),
-  clicked_callback = function() send_to_iopaint() end,
-}
-
 -- run a handler, surfacing any Lua error as a message instead of failing silently
 local function guarded(fn)
   return function()
@@ -547,16 +564,30 @@ local function guarded(fn)
   end
 end
 
+local button_send = dt.new_widget("button") {
+  label = _("send selection to IOPaint"),
+  tooltip = _("export the selected images and open them in IOPaint"),
+  clicked_callback = guarded(send_to_iopaint),
+}
+
 local button_import = dt.new_widget("button") {
   label = _("import IOPaint results"),
   tooltip = _("scan the IOPaint output folder and import saved images next to the originals"),
   clicked_callback = guarded(import_results),
 }
 
+-- assign to the forward-declared local so refresh_stop_button can toggle it
+button_stop = dt.new_widget("button") {
+  label = _("stop IOPaint server"),
+  tooltip = _("shut down the IOPaint server this script started"),
+  clicked_callback = guarded(stop_server),
+}
+
 local widget = dt.new_widget("box") {
   orientation = "vertical",
   button_send,
   button_import,
+  button_stop,
 }
 
 local views = {
@@ -564,14 +595,21 @@ local views = {
   [dt.gui.views.darkroom] = {"DT_UI_CONTAINER_PANEL_LEFT_CENTER", 100},
 }
 
-dt.register_lib(MODULE, _("IOPaint"), true, false, views, widget, nil, nil)
+-- refresh the stop button's enabled state whenever the module's view is entered
+dt.register_lib(MODULE, _("IOPaint"), true, false, views, widget,
+  function() refresh_stop_button() end, nil)
+
+pcall(refresh_stop_button)  -- set initial enabled state (defensive at load time)
 
 dt.register_event("iopaint_send", "shortcut",
-  function(_event, _shortcut) send_to_iopaint() end,
+  function(_event, _shortcut) guarded(send_to_iopaint)() end,
   _("IOPaint: send selection"))
 dt.register_event("iopaint_import", "shortcut",
   function(_event, _shortcut) guarded(import_results)() end,
   _("IOPaint: import results"))
+dt.register_event("iopaint_stop", "shortcut",
+  function(_event, _shortcut) guarded(stop_server)() end,
+  _("IOPaint: stop server"))
 
 -- ---------------------------------------------------------------------------
 -- script_manager integration

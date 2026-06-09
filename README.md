@@ -3,6 +3,8 @@
 A [darktable](https://www.darktable.org/) Lua script that drives [IOPaint](https://github.com/Sanster/IOPaint)
 to inpaint/clean up selected images and bring the results back into your library, group them with the originals, and copy over rating, color labels and tags.
 
+It includes a modified version of IOPaint to smooth the integration with darktable.
+
 See the original [IOPaint](https://github.com/Sanster/IOPaint) repository for the base code and for the documentation of IOPaint.
 
 Co-authored with Claude and Gemini.
@@ -24,26 +26,26 @@ Co-authored with Claude and Gemini.
 You can also trigger **Import IOPaint results** manually at any time (fallback if the
 automatic tab-close detection misses).
 
-The module appears in the right panel in lighttable and the left panel in darkroom. Two
-shortcuts (*IOPaint: send selection* / *IOPaint: import results*) can be bound under
-`settings > shortcuts > lua`.
+A **stop IOPaint server** button (enabled only while the server is running) shuts the
+managed server down.
 
-## Requirements
-
-- A clone of **this IOPaint fork** plus its virtualenv. `darktable/setup.sh` creates the
-  `.venv` and installs everything; the script then runs the server exclusively from that
-  checkout. (Automatic import relies on the `/api/v1/connected_clients` endpoint added in this
-  fork to detect when the browser session ends — vanilla IOPaint doesn't have it.)
-- **curl** on `PATH` (used for the health and session checks; present on Linux, macOS and
-  Windows 10+).
-- **Node.js / npm** (used once by `setup.sh` to build the web frontend).
-- darktable with Lua support (Lua API ≥ 7.0.0).
+The module appears in the right panel in lighttable and the left panel in darkroom. Three
+shortcuts (*IOPaint: send selection* / *IOPaint: import results* / *IOPaint: stop server*)
+can be bound under `settings > shortcuts > lua`.
 
 ## Quick install (recommended)
 
+**Prerequisites:**
+* `darktable` with Lua Api >= `7.0.0`
+* `node`/`npm`
+* A Python version between 3.8 and 3.11.
+
 One command clones this fork, builds it (virtualenv + dependencies + web frontend),
-wires the script into darktable, and (optionally) pre-downloads the model — then just
-start darktable.
+wires the script into darktable, and (optionally) pre-downloads the model.
+
+If the script completes successfully, you just need to
+restart darktable, enable the script in the Lua script
+editor and you are good to go.
 
 **macOS / Linux**
 
@@ -57,16 +59,14 @@ curl -fsSL https://raw.githubusercontent.com/masterpiga/darktable-iopaint/main/i
 irm https://raw.githubusercontent.com/masterpiga/darktable-iopaint/main/install.ps1 | iex
 ```
 
-It asks where to install and for your darktable config directory (sensible defaults
-offered), then does everything and registers the script with darktable's **lua scripts**
-panel. On next launch, enable **iopaint** (under `contrib`) in that panel — the **IOPaint**
+The script will ask you where to install and where your darktable config directory is located (sensible defaults are offered)
+
+On next launch, enable **iopaint** (under `contrib`) in the **lua scripts** panel — the **IOPaint**
 module then appears in lighttable and darkroom.
 
-(Prerequisites: `git`, `node`/`npm`, and a Python 3.8–3.11.)
-
-To set things up by hand instead, see **Manual setup** below.
-
 ## Manual setup
+
+If you prefer to set things up by hand instead (or for whatever reason the quick install script does not work for you):
 
 1. Clone this fork and run the setup script. It creates a virtualenv (`.venv` in the
    checkout), installs IOPaint (this fork) into it, and builds the web frontend:
@@ -107,8 +107,7 @@ Under `settings > lua options` (namespace **iopaint**):
 | Preference | Default | Notes |
 | --- | --- | --- |
 | server port | `8418` | Port for the dedicated IOPaint instance this script runs. Keep it distinct from any IOPaint you run manually (don't use 8080). |
-| **source checkout (this fork)** | *(empty)* | Path to where you
-cloned the repository. **Set this** — it's the only launch setting. The server is run from the checkout's `.venv` (created by `setup.sh`); the frontend, also built by `setup.sh`, is rebuilt on first launch only if missing. |
+| **source checkout (this fork)** | *(empty)* | Path to where you cloned the repository. **Set this** — it's the only launch setting. The server is run from the checkout's `.venv` (created by `setup.sh`); the frontend, also built by `setup.sh`, is rebuilt on first launch only if missing. |
 | model | `lama` | IOPaint model to load. |
 | result suffix | `_iopaint` | Appended to the imported filename before the extension. |
 | extra server arguments | *(empty)* | Appended verbatim to `iopaint start` (advanced, e.g. `--device cuda`). |
