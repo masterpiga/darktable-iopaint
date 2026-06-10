@@ -120,6 +120,12 @@ JSON file used to store the UI's presets so they persist across sessions and can
 be backed up (e.g. point this at your darktable config directory).
 """
 
+LOG_FILE_HELP = """
+Path to the file the server's stdout/stderr is being written to. When set, the UI
+can read it back (e.g. to debug model load failures). The launcher is responsible
+for the actual redirection; this just tells the server where to read from.
+"""
+
 GUI_HELP = """
 Launch Lama Cleaner as desktop app
 """

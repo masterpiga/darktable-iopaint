@@ -12,6 +12,8 @@ import { getMediaBlob, getMediaFile } from "@/lib/api"
 import { useStore } from "@/lib/states"
 import SettingsDialog from "./Settings"
 import PresetSelect from "./PresetSelect"
+import ModelManager from "./ModelManager"
+import LogsDialog from "./LogsDialog"
 import { cn, fileToImage } from "@/lib/utils"
 import { useToast } from "./ui/use-toast"
 
@@ -193,7 +195,9 @@ const Header = () => {
       {model.need_prompt ? <PromptInput /> : <></>}
 
       <div className="flex gap-1">
+        <ModelManager />
         <PresetSelect />
+        <LogsDialog />
         <Shortcuts />
         {serverConfig.disableModelSwitch ? <></> : <SettingsDialog />}
       </div>

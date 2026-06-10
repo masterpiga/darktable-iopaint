@@ -284,6 +284,9 @@ class ApiConfig(BaseModel):
     # (e.g. the darktable script points this at its config dir so presets are
     # backed up alongside other settings). If None, a default cache path is used.
     preset_file: Optional[Path] = None
+    # File the server's stdout/stderr is redirected to by the launcher, so the UI
+    # can read it back for debugging. If None, the log endpoint is unavailable.
+    log_file: Optional[Path] = None
 
 
 class InpaintRequest(BaseModel):

@@ -64,6 +64,7 @@ local PREF_TYPES = {
   port = "integer",
   iopaint_repo = "string",
   model = "string",
+  device = "enum",
   result_suffix = "string",
   extra_args = "string",
   disconnect_debounce = "integer",
@@ -80,7 +81,12 @@ dt.preferences.register(MODULE, "iopaint_repo", "string",
     .."once to create it."), "")
 dt.preferences.register(MODULE, "model", "string",
   _("IOPaint: model"),
-  _("model to load, e.g. lama"), "lama")
+  _("default model to load. You can also switch and download models from the IOPaint UI."), "lama")
+dt.preferences.register(MODULE, "device", "enum",
+  _("IOPaint: device"),
+  _("compute device for inference. 'cpu' works everywhere; 'mps' uses the Apple Silicon GPU; "
+    .."'cuda' uses an NVIDIA GPU. A GPU is strongly recommended for diffusion models."),
+  "cpu", "cpu", "mps", "cuda")
 dt.preferences.register(MODULE, "result_suffix", "string",
   _("IOPaint: result suffix"),
   _("suffix appended to the imported file name (before the extension)"), "_iopaint")
@@ -318,9 +324,10 @@ local function start_server()
   end
 
   local args = string.format(
-    'start --host 127.0.0.1 --port %d --input "%s" --output-dir "%s" --model %s --preset-file "%s" %s',
-    active_port, INPUT_DIR, OUTPUT_DIR, read_pref("model"), PRESET_FILE,
-    read_pref("extra_args") or "")
+    'start --host 127.0.0.1 --port %d --input "%s" --output-dir "%s" --model %s --device %s '
+      ..'--preset-file "%s" --log-file "%s" %s',
+    active_port, INPUT_DIR, OUTPUT_DIR, read_pref("model"), read_pref("device"),
+    PRESET_FILE, LOG_FILE, read_pref("extra_args") or "")
 
   local full
   if OS == "windows" then

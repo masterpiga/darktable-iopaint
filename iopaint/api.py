@@ -67,6 +67,38 @@ from iopaint.schema import (
 CURRENT_DIR = Path(__file__).parent.absolute().resolve()
 WEB_APP_DIR = CURRENT_DIR / "web_app"
 
+_MB = 1024 * 1024
+_GB = 1024 * _MB
+# Approximate download sizes for erase models (used when not downloaded yet, so
+# the UI can hint at the cost). Diffusion sizes are estimated by family below.
+_APPROX_ERASE_SIZE = {
+    "lama": 196 * _MB,
+    "ldm": 1900 * _MB,
+    "zits": 300 * _MB,
+    "mat": 500 * _MB,
+    "fcf": 280 * _MB,
+    "manga": 80 * _MB,
+    "migan": 80 * _MB,
+    "cv2": 0,
+}
+
+
+def _approx_diffusion_size(name: str) -> int:
+    return 7 * _GB if "xl" in name.lower() else 2 * _GB
+
+
+def _folder_size(path: Path) -> int:
+    # Sum real files only; the HF cache uses symlinks (snapshots/ -> blobs/), so
+    # skipping symlinks counts the underlying blobs exactly once.
+    total = 0
+    for p in path.rglob("*"):
+        try:
+            if p.is_file() and not p.is_symlink():
+                total += p.stat().st_size
+        except OSError:
+            pass
+    return total
+
 
 def api_middleware(app: FastAPI):
     rich_available = False
@@ -163,6 +195,9 @@ class Api:
             if config.preset_file
             else Path(default_cache) / "iopaint" / "presets.json"
         )
+        # Path the launcher redirects stdout/stderr to; readable via the log
+        # endpoint for debugging. None => log endpoint reports unavailable.
+        self.log_file = Path(config.log_file) if config.log_file else None
         api_middleware(self.app)
 
         self.file_manager = self._build_file_manager()
@@ -186,6 +221,9 @@ class Api:
         self.add_api_route("/api/v1/connected_clients", self.api_connected_clients, methods=["GET"])
         self.add_api_route("/api/v1/presets", self.api_get_presets, methods=["GET"])
         self.add_api_route("/api/v1/presets", self.api_save_presets, methods=["POST"])
+        self.add_api_route("/api/v1/server_log", self.api_server_log, methods=["GET"])
+        self.add_api_route("/api/v1/models", self.api_models, methods=["GET"])
+        self.add_api_route("/api/v1/download_model", self.api_download_model, methods=["POST"])
         self.app.mount("/", StaticFiles(directory=WEB_APP_DIR, html=True), name="assets")
         # fmt: on
 
@@ -262,6 +300,105 @@ class Api:
                 status_code=500, detail=f"Failed to save presets: {e}"
             )
         return {"ok": True}
+
+    def api_server_log(self, lines: int = 500):
+        # Return the tail of the server log so the UI can surface startup / model
+        # load failures. The launcher redirects stdout+stderr into this file.
+        if self.log_file is None:
+            return {
+                "available": False,
+                "path": None,
+                "log": "Server log is not available (started without --log-file).",
+            }
+        if not self.log_file.exists():
+            return {
+                "available": True,
+                "path": str(self.log_file),
+                "log": "",
+            }
+        try:
+            # Read at most the last ~512 KB to keep this cheap on large logs.
+            max_bytes = 512 * 1024
+            size = self.log_file.stat().st_size
+            with open(self.log_file, "rb") as f:
+                if size > max_bytes:
+                    f.seek(size - max_bytes)
+                data = f.read()
+            text = data.decode("utf-8", errors="replace")
+            tail = "\n".join(text.splitlines()[-lines:])
+        except Exception as e:
+            tail = f"Failed to read log file {self.log_file}: {e}"
+        return {"available": True, "path": str(self.log_file), "log": tail}
+
+    def api_models(self):
+        # List the known erase and diffusion models with download status and size
+        # (actual on-disk when downloaded, otherwise an estimate), so the UI can
+        # offer a model manager.
+        from iopaint.const import AVAILABLE_MODELS, DIFFUSION_MODELS
+        from iopaint.model import models as model_registry
+        from huggingface_hub.constants import HF_HUB_CACHE
+
+        hf_cache = Path(HF_HUB_CACHE)
+
+        def diffusion_size(name: str):
+            folder = hf_cache / ("models--" + name.replace("/", "--"))
+            return _folder_size(folder) if folder.exists() else None
+
+        result = []
+
+        for name in AVAILABLE_MODELS:
+            needs_download = name != "cv2"
+            downloaded = not needs_download
+            if needs_download:
+                m = model_registry.get(name)
+                try:
+                    downloaded = bool(m and m.is_downloaded())
+                except Exception:
+                    downloaded = False
+            result.append(
+                {
+                    "name": name,
+                    "family": "erase",
+                    "downloaded": downloaded,
+                    "size_bytes": _APPROX_ERASE_SIZE.get(name, 200 * _MB),
+                    "size_is_estimate": True,
+                    "needs_download": needs_download,
+                }
+            )
+
+        for name in DIFFUSION_MODELS:
+            size = diffusion_size(name)
+            downloaded = size is not None
+            result.append(
+                {
+                    "name": name,
+                    "family": "diffusion",
+                    "downloaded": downloaded,
+                    "size_bytes": size
+                    if downloaded
+                    else _approx_diffusion_size(name),
+                    "size_is_estimate": not downloaded,
+                    "needs_download": True,
+                }
+            )
+
+        return {"models": result, "current": self.model_manager.name}
+
+    async def api_download_model(self, request: Request):
+        # Download a model by name (an erase model id or any HuggingFace repo id).
+        # Blocking; the UI shows a spinner and the log viewer for progress detail.
+        body = await request.json()
+        name = ((body or {}).get("name") or "").strip()
+        if not name:
+            raise HTTPException(status_code=400, detail="Missing model name")
+        from iopaint.download import cli_download_model
+
+        try:
+            cli_download_model(name)
+        except Exception as e:
+            logger.error(f"Failed to download model {name}: {e}")
+            raise HTTPException(status_code=500, detail=f"Download failed: {e}")
+        return {"ok": True, "name": name}
 
     def api_current_model(self) -> ModelInfo:
         return self.model_manager.current_model

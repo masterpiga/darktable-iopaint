@@ -121,9 +121,10 @@ Under `settings > lua options` (namespace **iopaint**):
 | --- | --- | --- |
 | server port | `8418` | Port for the dedicated IOPaint instance this script runs. Keep it distinct from any IOPaint you run manually (don't use 8080). |
 | **source checkout (this fork)** | *(empty)* | Path to where you cloned the repository. **Set this** — it's the only launch setting. The server is run from the checkout's `.venv` (created by `setup.sh`); the frontend, also built by `setup.sh`, is rebuilt on first launch only if missing. |
-| model | `lama` | IOPaint model to load. |
+| model | `lama` | Default model to load at launch. You can also **switch and download** models from the IOPaint UI (the *Models* button), so this is just the starting model. |
+| device | `cpu` | Compute device: `cpu` (works everywhere), `mps` (Apple Silicon GPU), or `cuda` (NVIDIA GPU). A GPU is strongly recommended for diffusion models. |
 | result suffix | `_iopaint` | Appended to the imported filename before the extension. |
-| extra server arguments | *(empty)* | Appended verbatim to `iopaint start` (advanced, e.g. `--device mps` on Apple Silicon or `--device cuda`, needed for usable diffusion-model speed). |
+| extra server arguments | *(empty)* | Appended verbatim to `iopaint start` (advanced). |
 | disconnect debounce (seconds) | `2` | How long the browser must stay closed before importing (absorbs page reloads / blips). Lower = imports sooner. |
 
 Images are exported as 8-bit PNG: IOPaint and the inpainting models work in 8-bit RGB
@@ -144,9 +145,9 @@ The `model` preference accepts any model IOPaint supports. They fall into two fa
 - **Diffusion models** (e.g. `runwayml/stable-diffusion-inpainting`,
   `Uminosachi/realisticVisionV51_v51VAE-inpainting`, or an SDXL inpaint model) synthesize
   plausible texture *and* grain, which handles gradients and skin far better. They are heavier:
-  several GB to download, much slower, and they want a GPU — set `--device mps` (Apple Silicon)
-  or `--device cuda` in **extra server arguments**, otherwise inference runs on CPU and is very
-  slow. In the UI they expose a prompt, *strength* (lower = stays closer to the original),
+  several GB to download, much slower, and they want a GPU — set the **device** preference to
+  `mps` (Apple Silicon) or `cuda` (NVIDIA), otherwise inference runs on CPU and is very slow.
+  In the UI they expose a prompt, *strength* (lower = stays closer to the original),
   *mask blur*, steps and guidance. For subtle retouching, low strength + a little mask blur
   blends a fix in seamlessly. **BrushNet** and **PowerPaint V2** (with the `context-aware` or
   `object-remove` task) are diffusion variants tuned to respect the original pixels — good for
@@ -175,6 +176,22 @@ the next *send* still launches the server with the `model` preference above.
 When a **diffusion** model is active, the diffusion-options panel also gains a **Cropper** with
 **512 / 768 / 1024** quick-size buttons — the cropper restricts inpainting to a region processed
 at (near) native resolution, which improves diffusion quality and speed on large images.
+
+### Managing models from the UI
+
+The **Models** button (top-right) opens a manager listing the erase and diffusion models, each
+with its **download status** and **size** (actual on-disk when downloaded, otherwise an estimate
+prefixed with `~`). From here you can **Download** a model, **Use** an already-downloaded one
+(switches the running server, no restart), or download **any HuggingFace model id** via the
+field at the bottom. This means you no longer need to pick the model on the command line — the
+`model` preference is only the model loaded at launch.
+
+### Server logs
+
+The **Server logs** button (top-right) shows the tail of the server's output (stdout + stderr),
+which is the quickest way to debug a model that fails to load or download. The darktable script
+passes `--log-file` so the server can read back the same file it logs to
+(`<tmp>/iopaint_dt/iopaint.log`).
 
 ## How it works (and limitations)
 
@@ -212,6 +229,11 @@ This fork adds a few small server features:
   `--preset-file PATH` option on `iopaint start` telling the server where to store them. The
   darktable script points this at `<config>/iopaint_presets.json` so presets live in (and are
   backed up with) your darktable config rather than browser localStorage.
+- `GET /api/v1/models` — the known erase/diffusion models with download status and size; and
+  `POST /api/v1/download_model` (`{"name": …}`) to fetch one. These back the *Models* manager UI.
+- `GET /api/v1/server_log` — the tail of the server log, plus a new `--log-file PATH` option so
+  the server knows which file (written by the launcher's redirection) to read back. Backs the
+  *Server logs* viewer.
 
 The `--input` / `--output-dir` options (which enable the file browser and Ctrl+S
 auto-saving) are standard IOPaint features and are set automatically by this script.

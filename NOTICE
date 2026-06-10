@@ -13,11 +13,13 @@ License structure
   have been modified for the darktable integration; per Apache-2.0 section 4,
   such modifications are noted here and recorded in the project's git history.
   The modified upstream files are:
-    - iopaint/api.py        — adds the `/api/v1/connected_clients` endpoint and
-                              the `/api/v1/presets` (GET/POST) endpoints
-    - iopaint/cli.py        — adds the `--preset-file` option to `iopaint start`
-    - iopaint/schema.py     — adds `preset_file` to `ApiConfig`
-    - iopaint/const.py      — adds the `--preset-file` help text
+    - iopaint/api.py        — adds the `/api/v1/connected_clients`, `/api/v1/presets`
+                              (GET/POST), `/api/v1/server_log`, `/api/v1/models` and
+                              `/api/v1/download_model` endpoints
+    - iopaint/cli.py        — adds the `--preset-file` and `--log-file` options to
+                              `iopaint start`
+    - iopaint/schema.py     — adds `preset_file` and `log_file` to `ApiConfig`
+    - iopaint/const.py      — adds the `--preset-file` / `--log-file` help text
     - iopaint/helper.py     — replaces the removed stdlib `imghdr` with Pillow
     - requirements.txt      — relaxes pinned dependencies for newer Python
     - web_app/ (frontend)   — adds the Presets dropdown and cropper size

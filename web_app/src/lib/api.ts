@@ -117,6 +117,38 @@ export async function getPresets(): Promise<Preset[]> {
   return res.data?.presets ?? []
 }
 
+export interface ModelEntry {
+  name: string
+  family: "erase" | "diffusion"
+  downloaded: boolean
+  size_bytes: number
+  size_is_estimate: boolean
+  needs_download: boolean
+}
+
+export async function getModels(): Promise<{
+  models: ModelEntry[]
+  current: string
+}> {
+  const res = await api.get(`/models`)
+  return res.data
+}
+
+export async function downloadModel(name: string): Promise<void> {
+  await api.post(`/download_model`, { name })
+}
+
+export interface ServerLog {
+  available: boolean
+  path: string | null
+  log: string
+}
+
+export async function getServerLog(lines = 500): Promise<ServerLog> {
+  const res = await api.get(`/server_log`, { params: { lines } })
+  return res.data
+}
+
 export async function savePresets(presets: Preset[]): Promise<void> {
   await api.post(`/presets`, { presets })
 }
