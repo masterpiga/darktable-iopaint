@@ -125,6 +125,10 @@ local INPUT_DIR = ROOT..PS.."input"
 local OUTPUT_DIR = ROOT..PS.."output"
 local LOG_FILE = ROOT..PS.."iopaint.log"
 
+-- UI presets live in the darktable config dir (not the temp dir) so they persist
+-- across sessions and get backed up alongside the rest of darktable's config.
+local PRESET_FILE = dt.configuration.config_dir..PS.."iopaint_presets.json"
+
 -- in-memory mapping: exported/output filename -> source image. Shared by the
 -- automatic monitor and the manual "import results" action within a session.
 local current_mapping = {}
@@ -314,8 +318,9 @@ local function start_server()
   end
 
   local args = string.format(
-    'start --host 127.0.0.1 --port %d --input "%s" --output-dir "%s" --model %s %s',
-    active_port, INPUT_DIR, OUTPUT_DIR, read_pref("model"), read_pref("extra_args") or "")
+    'start --host 127.0.0.1 --port %d --input "%s" --output-dir "%s" --model %s --preset-file "%s" %s',
+    active_port, INPUT_DIR, OUTPUT_DIR, read_pref("model"), PRESET_FILE,
+    read_pref("extra_args") or "")
 
   local full
   if OS == "windows" then

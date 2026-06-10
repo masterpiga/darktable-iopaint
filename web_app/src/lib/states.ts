@@ -35,7 +35,13 @@ import {
   loadImage,
   srcToFile,
 } from "./utils"
-import inpaint, { getGenInfo, postAdjustMask, runPlugin } from "./api"
+import inpaint, {
+  getGenInfo,
+  getPresets,
+  postAdjustMask,
+  runPlugin,
+  savePresets,
+} from "./api"
 import { toast } from "@/components/ui/use-toast"
 
 type FileManagerState = {
@@ -113,6 +119,16 @@ export type Settings = {
   adjustMaskKernelSize: number
 }
 
+// A named snapshot of the full diffusion settings (model included), saved by the
+// user and loadable from the top-bar Presets dropdown. `cropper` stores the
+// cropper size, which lives outside `settings` (in cropperState); optional so
+// presets saved before it was captured still load.
+export type Preset = {
+  name: string
+  settings: Settings
+  cropper?: { width: number; height: number }
+}
+
 type InteractiveSegState = {
   isInteractiveSeg: boolean
   tmpInteractiveSegMask: HTMLImageElement | null
@@ -161,6 +177,8 @@ type AppState = {
   serverConfig: ServerConfig
 
   settings: Settings
+
+  presets: Preset[]
 }
 
 type AppAction = {
@@ -181,6 +199,8 @@ type AppAction = {
   setCropperY: (newValue: number) => void
   setCropperWidth: (newValue: number) => void
   setCropperHeight: (newValue: number) => void
+  setCropperSize: (size: number) => void
+  setCropperDimensions: (width: number, height: number) => void
 
   setExtenderX: (newValue: number) => void
   setExtenderY: (newValue: number) => void
@@ -188,6 +208,12 @@ type AppAction = {
   setExtenderHeight: (newValue: number) => void
 
   setIsCropperExtenderResizing: (newValue: boolean) => void
+
+  setPresets: (presets: Preset[]) => void
+  loadPresets: () => Promise<void>
+  savePreset: (name: string) => Promise<void>
+  deletePreset: (name: string) => Promise<void>
+
   updateExtenderDirection: (newValue: ExtenderDirection) => void
   resetExtender: (width: number, height: number) => void
   updateExtenderByBuiltIn: (direction: ExtenderDirection, scale: number) => void
@@ -362,6 +388,8 @@ const defaultValues: AppState = {
     powerpaintTask: PowerPaintTask.text_guided,
     adjustMaskKernelSize: 12,
   },
+
+  presets: [],
 }
 
 export const useStore = createWithEqualityFn<AppState & AppAction>()(
@@ -1008,6 +1036,69 @@ export const useStore = createWithEqualityFn<AppState & AppAction>()(
         set((state) => {
           state.cropperState.height = newValue
         }),
+
+      // Set the cropper to a fixed square size.
+      setCropperSize: (size: number) => get().setCropperDimensions(size, size),
+
+      // Set the cropper width/height, clamped to the image and kept inside its
+      // bounds (keeps the current top-left, nudging it in if needed).
+      setCropperDimensions: (width: number, height: number) =>
+        set((state) => {
+          const { imageWidth, imageHeight } = state
+          const w = Math.min(width, imageWidth)
+          const h = Math.min(height, imageHeight)
+          state.cropperState.width = w
+          state.cropperState.height = h
+          state.cropperState.x = Math.max(
+            0,
+            Math.min(state.cropperState.x, imageWidth - w)
+          )
+          state.cropperState.y = Math.max(
+            0,
+            Math.min(state.cropperState.y, imageHeight - h)
+          )
+        }),
+
+      // Presets are persisted server-side (so they live in the darktable config
+      // dir and get backed up with it), not in browser localStorage.
+      setPresets: (presets: Preset[]) =>
+        set((state) => {
+          state.presets = presets
+        }),
+
+      loadPresets: async () => {
+        const presets = await getPresets()
+        set((state) => {
+          state.presets = presets
+        })
+      },
+
+      // Snapshot the current settings (model included) under `name`, replacing
+      // any existing preset with the same name. Kept sorted by name, then
+      // persisted to the server.
+      savePreset: async (name: string) => {
+        const snapshot = JSON.parse(
+          JSON.stringify(get().settings)
+        ) as Settings
+        const { width, height } = get().cropperState
+        const others = get().presets.filter((p) => p.name !== name)
+        const presets = [
+          ...others,
+          { name, settings: snapshot, cropper: { width, height } },
+        ].sort((a, b) => a.name.localeCompare(b.name))
+        set((state) => {
+          state.presets = presets
+        })
+        await savePresets(presets)
+      },
+
+      deletePreset: async (name: string) => {
+        const presets = get().presets.filter((p) => p.name !== name)
+        set((state) => {
+          state.presets = presets
+        })
+        await savePresets(presets)
+      },
 
       setExtenderX: (newValue: number) =>
         set((state) => {

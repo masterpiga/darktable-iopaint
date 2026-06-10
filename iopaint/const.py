@@ -115,6 +115,11 @@ If input is image, it will be loaded by default.
 If input is directory, you can browse and select image in file manager.
 """
 
+PRESET_FILE_HELP = """
+JSON file used to store the UI's presets so they persist across sessions and can
+be backed up (e.g. point this at your darktable config directory).
+"""
+
 GUI_HELP = """
 Launch Lama Cleaner as desktop app
 """

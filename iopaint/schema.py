@@ -280,6 +280,10 @@ class ApiConfig(BaseModel):
     gfpgan_device: Device
     enable_restoreformer: bool
     restoreformer_device: Device
+    # JSON file where the UI's presets are stored. Set by external integrations
+    # (e.g. the darktable script points this at its config dir so presets are
+    # backed up alongside other settings). If None, a default cache path is used.
+    preset_file: Optional[Path] = None
 
 
 class InpaintRequest(BaseModel):

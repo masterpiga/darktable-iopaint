@@ -63,6 +63,7 @@ const DiffusionOptions = () => {
     updateEnableBrushNet,
     updateEnableControlnet,
     updateLCMLora,
+    setCropperSize,
   ] = useStore((state) => [
     state.serverConfig.samplers,
     state.settings,
@@ -79,6 +80,7 @@ const DiffusionOptions = () => {
     state.updateEnableBrushNet,
     state.updateEnableControlnet,
     state.updateLCMLora,
+    state.setCropperSize,
   ])
   const [exampleImage, isExampleImageLoaded] = useImage(paintByExampleFile)
   const negativePromptRef = useRef(null)
@@ -98,22 +100,54 @@ const DiffusionOptions = () => {
 
   const renderCropper = () => {
     return (
-      <RowContainer>
-        <LabelTitle
-          text="Cropper"
-          toolTip="Inpainting on part of image, improve inference speed and reduce memory usage."
-        />
-        <Switch
-          id="cropper"
-          checked={settings.showCropper}
-          onCheckedChange={(value) => {
-            updateSettings({ showCropper: value })
-            if (value) {
-              updateSettings({ showExtender: false })
-            }
-          }}
-        />
-      </RowContainer>
+      <div className="flex flex-col gap-2">
+        <RowContainer>
+          <LabelTitle
+            text="Cropper"
+            toolTip="Inpainting on part of image, improve inference speed and reduce memory usage."
+          />
+          <Switch
+            id="cropper"
+            checked={settings.showCropper}
+            onCheckedChange={(value) => {
+              updateSettings({ showCropper: value })
+              if (value) {
+                updateSettings({ showExtender: false })
+              }
+            }}
+          />
+        </RowContainer>
+
+        <RowContainer>
+          <div />
+          <div className="flex gap-1 justify-center mt-0">
+            <Button
+              variant="outline"
+              className="p-1 h-8"
+              disabled={!settings.showCropper}
+              onClick={() => setCropperSize(512)}
+            >
+              <div className="flex items-center gap-1">512</div>
+            </Button>
+            <Button
+              variant="outline"
+              className="p-1 h-8"
+              disabled={!settings.showCropper}
+              onClick={() => setCropperSize(768)}
+            >
+              <div className="flex items-center gap-1">768</div>
+            </Button>
+            <Button
+              variant="outline"
+              className="p-1 h-8"
+              disabled={!settings.showCropper}
+              onClick={() => setCropperSize(1024)}
+            >
+              <div className="flex items-center gap-1">1024</div>
+            </Button>
+          </div>
+        </RowContainer>
+      </div>
     )
   }
 

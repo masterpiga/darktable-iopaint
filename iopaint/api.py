@@ -1,4 +1,5 @@
 import asyncio
+import json
 import os
 import threading
 import time
@@ -152,6 +153,16 @@ class Api:
         self.router = APIRouter()
         self.queue_lock = threading.Lock()
         self.connected_clients = set()
+        # Where UI presets are persisted. Integrations can point this anywhere
+        # (e.g. the darktable config dir); otherwise fall back to the user cache.
+        default_cache = os.getenv(
+            "XDG_CACHE_HOME", os.path.join(os.path.expanduser("~"), ".cache")
+        )
+        self.preset_file = (
+            Path(config.preset_file)
+            if config.preset_file
+            else Path(default_cache) / "iopaint" / "presets.json"
+        )
         api_middleware(self.app)
 
         self.file_manager = self._build_file_manager()
@@ -173,6 +184,8 @@ class Api:
         self.add_api_route("/api/v1/adjust_mask", self.api_adjust_mask, methods=["POST"])
         self.add_api_route("/api/v1/save_image", self.api_save_image, methods=["POST"])
         self.add_api_route("/api/v1/connected_clients", self.api_connected_clients, methods=["GET"])
+        self.add_api_route("/api/v1/presets", self.api_get_presets, methods=["GET"])
+        self.add_api_route("/api/v1/presets", self.api_save_presets, methods=["POST"])
         self.app.mount("/", StaticFiles(directory=WEB_APP_DIR, html=True), name="assets")
         # fmt: on
 
@@ -217,6 +230,38 @@ class Api:
         # tooling (e.g. the darktable integration) to detect when an editing session
         # has started and ended.
         return {"count": len(self.connected_clients)}
+
+    def api_get_presets(self):
+        # Read the persisted UI presets. Returns an empty list if none have been
+        # saved yet or the file is missing/unreadable.
+        if not self.preset_file.exists():
+            return {"presets": []}
+        try:
+            data = json.loads(self.preset_file.read_text(encoding="utf-8"))
+            presets = data.get("presets", []) if isinstance(data, dict) else []
+        except Exception as e:
+            logger.warning(f"Failed to read presets from {self.preset_file}: {e}")
+            presets = []
+        return {"presets": presets}
+
+    async def api_save_presets(self, request: Request):
+        # Persist the full preset list (the UI sends the whole list on every
+        # change). Stored as opaque JSON so the server stays agnostic of the
+        # frontend settings shape.
+        body = await request.json()
+        presets = body.get("presets", []) if isinstance(body, dict) else []
+        try:
+            self.preset_file.parent.mkdir(parents=True, exist_ok=True)
+            self.preset_file.write_text(
+                json.dumps({"presets": presets}, indent=2, ensure_ascii=False),
+                encoding="utf-8",
+            )
+        except Exception as e:
+            logger.error(f"Failed to write presets to {self.preset_file}: {e}")
+            raise HTTPException(
+                status_code=500, detail=f"Failed to save presets: {e}"
+            )
+        return {"ok": True}
 
     def api_current_model(self) -> ModelInfo:
         return self.model_manager.current_model

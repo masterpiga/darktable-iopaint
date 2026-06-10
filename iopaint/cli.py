@@ -143,6 +143,7 @@ def start(
     gfpgan_device: Device = Option(Device.cpu),
     enable_restoreformer: bool = Option(False),
     restoreformer_device: Device = Option(Device.cpu),
+    preset_file: Optional[Path] = Option(None, help=PRESET_FILE_HELP),
 ):
     dump_environment_info()
     device = check_device(device)
@@ -224,6 +225,7 @@ def start(
         gfpgan_device=gfpgan_device,
         enable_restoreformer=enable_restoreformer,
         restoreformer_device=restoreformer_device,
+        preset_file=preset_file,
     )
     print(api_config.model_dump_json(indent=4))
     api = Api(app, api_config)

@@ -123,17 +123,58 @@ Under `settings > lua options` (namespace **iopaint**):
 | **source checkout (this fork)** | *(empty)* | Path to where you cloned the repository. **Set this** — it's the only launch setting. The server is run from the checkout's `.venv` (created by `setup.sh`); the frontend, also built by `setup.sh`, is rebuilt on first launch only if missing. |
 | model | `lama` | IOPaint model to load. |
 | result suffix | `_iopaint` | Appended to the imported filename before the extension. |
-| extra server arguments | *(empty)* | Appended verbatim to `iopaint start` (advanced, e.g. `--device cuda`). |
+| extra server arguments | *(empty)* | Appended verbatim to `iopaint start` (advanced, e.g. `--device mps` on Apple Silicon or `--device cuda`, needed for usable diffusion-model speed). |
 | disconnect debounce (seconds) | `2` | How long the browser must stay closed before importing (absorbs page reloads / blips). Lower = imports sooner. |
 
-Images are exported as 8-bit PNG: IOPaint and the LaMa model work in 8-bit RGB throughout
-(input is converted to 8-bit on load, and the browser editor composites on an 8-bit canvas),
+Images are exported as 8-bit PNG: IOPaint and the inpainting models work in 8-bit RGB
+throughout (input is converted to 8-bit on load, the browser editor composites on an 8-bit
+canvas, and diffusion models operate in a normalized latent space and reconstruct to 8-bit),
 so a deeper export would just be downconverted with no quality gain.
+
+### Choosing a model
+
+The `model` preference accepts any model IOPaint supports. They fall into two families:
+
+- **Erase models** (`lama`, `migan`, `mat`, `fcf`, `zits`, …) remove the masked area with no
+  prompt. They're fast and need no GPU. **`lama` is the best general choice** here — the others
+  are usually lower-fidelity on photographic content. Erase models excel at removing larger
+  objects/distractors against structured backgrounds; on smooth gradients (sky, skin, bokeh)
+  they can smear, and they don't reproduce grain, so a clean fix can "pop" against grainy
+  surroundings.
+- **Diffusion models** (e.g. `runwayml/stable-diffusion-inpainting`,
+  `Uminosachi/realisticVisionV51_v51VAE-inpainting`, or an SDXL inpaint model) synthesize
+  plausible texture *and* grain, which handles gradients and skin far better. They are heavier:
+  several GB to download, much slower, and they want a GPU — set `--device mps` (Apple Silicon)
+  or `--device cuda` in **extra server arguments**, otherwise inference runs on CPU and is very
+  slow. In the UI they expose a prompt, *strength* (lower = stays closer to the original),
+  *mask blur*, steps and guidance. For subtle retouching, low strength + a little mask blur
+  blends a fix in seamlessly. **BrushNet** and **PowerPaint V2** (with the `context-aware` or
+  `object-remove` task) are diffusion variants tuned to respect the original pixels — good for
+  prompt-free, grain-aware fills.
+
+For fine **creases/dust on smooth or grainy areas**, darktable's own **retouch** module (heal
+mode + wavelet scales) is often better than any inpaint model, because it copies *real*
+neighbouring grain instead of synthesizing it. A hybrid works well: IOPaint for the heavy
+removal, retouch for grain-matched cleanup.
 
 > **Note on models:** model weights are licensed separately from this code and are downloaded
 > at runtime under their own terms. The default **lama** is Apache-2.0. Other models IOPaint
 > can fetch may be more restrictive — e.g. the RemoveBG model `briaai/RMBG-1.4` is for
-> **non-commercial use only**. Check the license of any model you enable before relying on it.
+> **non-commercial use only**, and many diffusion checkpoints are community/OpenRAIL-licensed.
+> Check the license of any model you enable before relying on it.
+
+### Presets
+
+The IOPaint UI has a **Presets** dropdown (bookmark icon, top-right). *Save current as preset…*
+snapshots the **full settings, including the model**; selecting a preset reapplies them (and
+switches the running server's model if it differs). Presets are stored as JSON in your
+**darktable config dir** (`<config>/iopaint_presets.json`), so they persist across sessions and
+get backed up with the rest of your darktable config. Note a preset is a per-session override:
+the next *send* still launches the server with the `model` preference above.
+
+When a **diffusion** model is active, the diffusion-options panel also gains a **Cropper** with
+**512 / 768 / 1024** quick-size buttons — the cropper restricts inpainting to a region processed
+at (near) native resolution, which improves diffusion quality and speed on large images.
 
 ## How it works (and limitations)
 
@@ -160,16 +201,25 @@ so a deeper export would just be downconverted with no quality gain.
 
 ## The IOPaint side
 
-This fork adds one small server endpoint:
+This fork adds a few small server features:
 
 - `GET /api/v1/connected_clients` → `{"count": N}` — number of currently connected web
   clients (tracked via the existing Socket.IO connection the UI already opens). This is what
   lets the script notice when you close the browser tab. **Vanilla IOPaint does not have
   it**: against a vanilla server the script detects this, skips the auto-import, and tells you
   to use *Import IOPaint results* manually.
+- `GET` / `POST /api/v1/presets` — read and write the UI's presets as JSON, plus a new
+  `--preset-file PATH` option on `iopaint start` telling the server where to store them. The
+  darktable script points this at `<config>/iopaint_presets.json` so presets live in (and are
+  backed up with) your darktable config rather than browser localStorage.
 
 The `--input` / `--output-dir` options (which enable the file browser and Ctrl+S
 auto-saving) are standard IOPaint features and are set automatically by this script.
+
+A couple of small frontend fixes are also included: the HD **Crop** strategy parameters
+(crop trigger size / margin) were misspelled in the inpaint request and silently ignored —
+now corrected and the crop margin widened, which reduces seams/smearing from erase models on
+high-resolution images.
 
 The frontend build step is `scripts/build_frontend.sh` (`npm run build` in `web_app/`, copied
 into `iopaint/web_app/`). `setup.sh` runs it during setup; the darktable script also runs it on

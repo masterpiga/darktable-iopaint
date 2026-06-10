@@ -6,7 +6,7 @@ import {
   Rect,
   ServerConfig,
 } from "@/lib/types"
-import { Settings } from "@/lib/states"
+import { Preset, Settings } from "@/lib/states"
 import { convertToBase64, srcToFile } from "@/lib/utils"
 import axios from "axios"
 
@@ -53,9 +53,9 @@ export default async function inpaint(
       cv2_flag: settings.cv2Flag,
       cv2_radius: settings.cv2Radius,
       hd_strategy: "Crop",
-      hd_strategy_crop_triger_size: 640,
-      hd_strategy_crop_margin: 128,
-      hd_trategy_resize_imit: 2048,
+      hd_strategy_crop_trigger_size: 640,
+      hd_strategy_crop_margin: 256,
+      hd_strategy_resize_limit: 2048,
       prompt: settings.prompt,
       negative_prompt: settings.negativePrompt,
       use_croper: settings.showCropper,
@@ -110,6 +110,15 @@ export async function getServerConfig(): Promise<ServerConfig> {
 export async function switchModel(name: string): Promise<ModelInfo> {
   const res = await api.post(`/model`, { name })
   return res.data
+}
+
+export async function getPresets(): Promise<Preset[]> {
+  const res = await api.get(`/presets`)
+  return res.data?.presets ?? []
+}
+
+export async function savePresets(presets: Preset[]): Promise<void> {
+  await api.post(`/presets`, { presets })
 }
 
 export async function switchPluginModel(
