@@ -369,6 +369,211 @@ local function copy_metadata(src, dst)
 end
 
 -- ---------------------------------------------------------------------------
+-- composite overlay (fork-specific)
+--
+-- Besides importing the result PNG, drop a duplicate of the original carrying
+-- an "overlay" (composite) module that composites the result back in as the
+-- final step before the output colour profile (it was exported already tone-
+-- mapped, so it must not be reprocessed). darktable's Lua API cannot set module
+-- parameters directly, so we synthesise a one-module .dtstyle and apply it to
+-- the duplicate.
+-- ---------------------------------------------------------------------------
+
+-- dt_iop_overlay_params_t, DT_MODULE_INTROSPECTION version 1 (iop/overlay.c).
+-- The struct packs contiguously with no internal padding on 64-bit targets
+-- (every field lands on its natural alignment; the 1024-byte filename ends on
+-- an 8-byte boundary), so sizeof == 1088. Revisit if overlay.c bumps its
+-- introspection version or reorders fields.
+local OVERLAY_MODVERSION = 1
+local OVERLAY_PARAMS_SIZE = 1088
+local TMP_STYLE_NAME = "iopaint_overlay_tmp"   -- our synthesised one-module overlay style
+local ORDER_STYLE_NAME = "iopaint_order_tmp"   -- throwaway style used to harvest the pipe order
+local OVERLAY_ANCHOR = "colorout"              -- output colour profile; overlay goes right before it
+
+local function to_hex(s)
+  return (s:gsub(".", function(c) return string.format("%02x", c:byte()) end))
+end
+
+-- hex-encoded op_params for the overlay module pointing at the imported result.
+-- darktable's .dtstyle reader accepts a plain hex blob (no "gz" prefix) and
+-- binds it verbatim, so the byte layout must match the C struct exactly.
+local function overlay_op_params(imgid, abs_path)
+  if not string.pack then return nil end           -- needs Lua 5.3+ (darktable ships 5.4)
+  if #abs_path > 1023 then abs_path = abs_path:sub(1, 1023) end   -- keep a trailing NUL
+  local ok, blob = pcall(string.pack,
+    "<ffffi4fi4i4i4i4c1024I8I8i8",
+    100.0,             -- opacity   ($DEFAULT 100)
+    100.0,             -- scale     ($DEFAULT 100)
+    0.0,               -- xoffset
+    0.0,               -- yoffset
+    4,                 -- alignment ($DEFAULT 4, centred)
+    0.0,               -- rotate
+    0,                 -- scale_base = DT_SCALE_MAINMENU_IMAGE
+    3,                 -- scale_img  = DT_SCALE_IMG_LARGER
+    0,                 -- scale_svg  = DT_SCALE_SVG_WIDTH
+    math.floor(imgid), -- imgid: current-session db id of the result
+    abs_path,          -- filename[1024]: re-resolves the overlay across sessions
+    0, 0, 0)           -- dummy0 / dummy1 / dummy2
+  if not ok or #blob ~= OVERLAY_PARAMS_SIZE then
+    log("overlay: unexpected params blob ("..tostring(ok and #blob or blob)..")")
+    return nil
+  end
+  return to_hex(blob)
+end
+
+-- create a duplicate carrying the original's edit history, with graceful
+-- fallbacks across darktable versions (the database helper landed in 5.0; the
+-- image method predates it; a plain duplicate is the last resort).
+local function duplicate_image(img)
+  if dt.database.duplicate_with_history then
+    local ok, dup = pcall(dt.database.duplicate_with_history, img)
+    if ok and dup then return dup end
+  end
+  local ok2, dup2 = pcall(function() return img:duplicate_with_history() end)
+  if ok2 and dup2 then return dup2 end
+  if dt.database.duplicate then
+    local ok3, dup3 = pcall(dt.database.duplicate, img)
+    if ok3 and dup3 then return dup3 end
+  end
+  return nil
+end
+
+local function delete_styles_named(name)
+  for _, s in ipairs(dt.styles) do
+    if s.name == name then pcall(dt.styles.delete, s) end
+  end
+end
+
+local function style_named(name)
+  for _, s in ipairs(dt.styles) do
+    if s.name == name then return s end
+  end
+  return nil
+end
+
+-- An <iop_list> ("op,N,op,N,...") with every overlay entry dropped and a single
+-- "overlay,0" re-inserted just before OVERLAY_ANCHOR (the output colour profile),
+-- so the composite is the last thing before colorout. nil if the anchor is
+-- absent (then we skip rather than misplace the module).
+local function relocate_overlay_last(list_text)
+  local toks = {}
+  for tok in list_text:gmatch("[^,]+") do toks[#toks + 1] = tok end
+  local out, anchored, i = {}, false, 1
+  while i + 1 <= #toks do
+    local op, inst = toks[i], toks[i + 1]
+    if op == "overlay" then                        -- relocated below
+    elseif op == OVERLAY_ANCHOR and not anchored then
+      out[#out + 1] = "overlay,0"
+      out[#out + 1] = op..","..inst
+      anchored = true
+    else
+      out[#out + 1] = op..","..inst
+    end
+    i = i + 2
+  end
+  if not anchored then return nil end
+  return table.concat(out, ",")
+end
+
+-- Harvest darktable's own module order for `img` instead of hardcoding it: a
+-- style created from an image embeds its full, authoritative <iop_list> (Lua's
+-- create passes copy_iop_order=TRUE). We create a throwaway style, export it,
+-- read the order back, drop the temp style, and force overlay last. Returns the
+-- order text, or nil on any failure.
+local function harvest_iop_order(img)
+  delete_styles_named(ORDER_STYLE_NAME)            -- clear any stale leftover
+  if not pcall(dt.styles.create, img, ORDER_STYLE_NAME, "") then return nil end
+  local style = style_named(ORDER_STYLE_NAME)
+  if not style then return nil end
+
+  local file = ROOT..PS..ORDER_STYLE_NAME..".dtstyle"
+  os.remove(file)
+  pcall(dt.styles.export, style, ROOT, true)
+  pcall(dt.styles.delete, style)
+
+  local fh = io.open(file, "r")
+  if not fh then return nil end
+  local xml = fh:read("*a")
+  fh:close()
+  os.remove(file)
+
+  local list_text = xml and xml:match("<iop_list>(.-)</iop_list>")
+  if not list_text or list_text == "" then return nil end
+  return relocate_overlay_last(list_text)
+end
+
+-- duplicate `src_image` (keeping its edits) and composite `result_image`
+-- (file at `result_path`) on top via the overlay module, forced last (before
+-- the output colour profile). Best-effort: any failure here must not abort the
+-- PNG import.
+local function add_overlay_duplicate(src_image, result_image, result_path)
+  local hex = overlay_op_params(result_image.id, result_path)
+  if not hex then
+    log("overlay: could not build module params; skipping composite for "
+      ..tostring(src_image.filename))
+    return
+  end
+
+  local iop_list = harvest_iop_order(src_image)
+  if not iop_list then
+    log("overlay: could not determine module order; skipping composite for "
+      ..tostring(src_image.filename))
+    return
+  end
+
+  local dup = duplicate_image(src_image)
+  if not dup then
+    log("overlay: could not duplicate "..tostring(src_image.filename))
+    return
+  end
+
+  -- The <iop_list> in <info> drives placement (the per-plugin <iop_order> is
+  -- ignored on apply). blendop is omitted on purpose: the reader defaults it to
+  -- "no blend", which is what we want for an opaque composite.
+  local xml = string.format(
+[[<?xml version="1.0" encoding="UTF-8"?>
+<darktable_style version="1.0">
+<info>
+<name>%s</name>
+<description>IOPaint composite overlay (temporary)</description>
+<iop_list>%s</iop_list>
+</info>
+<style>
+<plugin>
+<num>0</num>
+<module>%d</module>
+<operation>overlay</operation>
+<op_params>%s</op_params>
+<enabled>1</enabled>
+<multi_priority>0</multi_priority>
+<multi_name></multi_name>
+</plugin>
+</style>
+</darktable_style>
+]], TMP_STYLE_NAME, iop_list, OVERLAY_MODVERSION, hex)
+
+  local style_file = ROOT..PS.."iopaint_overlay.dtstyle"
+  local fh = io.open(style_file, "w")
+  if not fh then
+    log("overlay: cannot write "..style_file)
+    return
+  end
+  fh:write(xml)
+  fh:close()
+
+  delete_styles_named(TMP_STYLE_NAME)              -- avoid an import name clash
+  dt.styles.import(style_file)                     -- returns nothing; find it by name
+  local style = style_named(TMP_STYLE_NAME)
+  if style then
+    pcall(dt.styles.apply, style, dup)
+    pcall(dt.styles.delete, style)
+  else
+    log("overlay: style import failed for "..style_file)
+  end
+  os.remove(style_file)
+end
+
+-- ---------------------------------------------------------------------------
 -- import
 -- ---------------------------------------------------------------------------
 
@@ -390,6 +595,9 @@ local function import_results()
             -- stack the result with its original (the source stays group leader)
             new_image:group_with(src_image)
             src_image:make_group_leader()
+            -- also drop a duplicate of the original that composites the result
+            -- in via the overlay module, just before the tone mapper
+            pcall(add_overlay_duplicate, src_image, new_image, dest)
             count = count + 1
           else
             log("failed to import "..dest)
