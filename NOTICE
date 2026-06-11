@@ -21,6 +21,12 @@ License structure
     - iopaint/schema.py     — adds `preset_file` and `log_file` to `ApiConfig`
     - iopaint/const.py      — adds the `--preset-file` / `--log-file` help text
     - iopaint/helper.py     — replaces the removed stdlib `imghdr` with Pillow
+    - iopaint/download.py    — detects inpaint diffusers models by UNet
+                              in_channels (fixes model-type misclassification);
+                              retries downloads on transient Hub-connection errors
+    - iopaint/model_manager.py — always runs switch_controlnet_method /
+                              switch_brushnet_method so disabling ControlNet or
+                              BrushNet takes effect (was skipped when toggled off)
     - requirements.txt      — relaxes pinned dependencies for newer Python
     - web_app/ (frontend)   — adds the Presets dropdown and cropper size
                               buttons, fixes the HD crop-strategy request fields,

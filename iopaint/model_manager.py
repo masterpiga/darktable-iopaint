@@ -101,10 +101,12 @@ class ModelManager:
         Returns:
             BGR image
         """
-        if config.enable_controlnet:
-            self.switch_controlnet_method(config)
-        if config.enable_brushnet:
-            self.switch_brushnet_method(config)
+        # Always call these so a disable (config.enable_* == False) reloads the
+        # pipeline without the feature. Guarding on config.enable_* would skip the
+        # disable path inside switch_*_method, leaving the feature active after
+        # it's toggled off.
+        self.switch_controlnet_method(config)
+        self.switch_brushnet_method(config)
 
         self.enable_disable_powerpaint_v2(config)
         self.enable_disable_lcm_lora(config)

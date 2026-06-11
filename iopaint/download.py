@@ -1,8 +1,9 @@
 import glob
 import json
 import os
+import time
 from functools import lru_cache
-from typing import List, Optional
+from typing import Callable, List, Optional
 
 from iopaint.schema import ModelType, ModelInfo
 from loguru import logger
@@ -19,30 +20,95 @@ from iopaint.const import (
 from iopaint.model.original_sd_configs import get_config_files
 
 
+_DOWNLOAD_MAX_ATTEMPTS = 3
+_DOWNLOAD_RETRY_BACKOFF = 5  # seconds, multiplied by the attempt number
+
+# Substrings that mark a transient Hub-connectivity failure (as opposed to a
+# genuine 404/auth error). The Hub client wraps a dropped connection and then
+# reports the local-cache miss, so we match both the raw socket error and that
+# fallback message.
+_TRANSIENT_NETWORK_MARKERS = (
+    "connection reset",
+    "connection aborted",
+    "connection error",
+    "reset by peer",
+    "broken pipe",
+    "timed out",
+    "timeout",
+    "max retries",
+    "couldn't connect to the hub",
+    "error occurred while trying to fetch",
+    "not cached locally",
+    "temporarily",
+)
+
+
+def _is_transient_network_error(e: BaseException) -> bool:
+    if isinstance(e, (ConnectionError, TimeoutError)):
+        return True
+    msg = str(e).lower()
+    return any(marker in msg for marker in _TRANSIENT_NETWORK_MARKERS)
+
+
+def _download_with_retry(desc: str, fn: Callable, *args, **kwargs):
+    # HF downloads are resumable, so re-running after a dropped connection picks
+    # up where it left off instead of restarting. Only retry transient network
+    # failures; re-raise genuine errors (bad repo id, auth) immediately.
+    for attempt in range(1, _DOWNLOAD_MAX_ATTEMPTS + 1):
+        try:
+            return fn(*args, **kwargs)
+        except Exception as e:
+            if attempt >= _DOWNLOAD_MAX_ATTEMPTS or not _is_transient_network_error(e):
+                raise
+            wait = _DOWNLOAD_RETRY_BACKOFF * attempt
+            logger.warning(
+                f"{desc} failed (attempt {attempt}/{_DOWNLOAD_MAX_ATTEMPTS}): {e}. "
+                f"Retrying in {wait}s (partial downloads resume)..."
+            )
+            time.sleep(wait)
+
+
 def cli_download_model(model: str):
     from iopaint.model import models
     from iopaint.model.utils import handle_from_pretrained_exceptions
 
     if model in models and models[model].is_erase_model:
         logger.info(f"Downloading {model}...")
-        models[model].download()
+        _download_with_retry(f"Downloading {model}", models[model].download)
         logger.info("Done.")
     elif model == ANYTEXT_NAME:
         logger.info(f"Downloading {model}...")
-        models[model].download()
+        _download_with_retry(f"Downloading {model}", models[model].download)
         logger.info("Done.")
     else:
         logger.info(f"Downloading model from Huggingface: {model}")
         from diffusers import DiffusionPipeline
 
-        downloaded_path = handle_from_pretrained_exceptions(
-            DiffusionPipeline.download, pretrained_model_name=model, variant="fp16"
+        downloaded_path = _download_with_retry(
+            f"Downloading {model} from Huggingface",
+            handle_from_pretrained_exceptions,
+            DiffusionPipeline.download,
+            pretrained_model_name=model,
+            variant="fp16",
         )
         logger.info(f"Done. Downloaded to {downloaded_path}")
 
 
 def folder_name_to_show_name(name: str) -> str:
     return name.replace("models--", "").replace("--", "/")
+
+
+def _diffusers_unet_in_channels(model_index_path: Path) -> Optional[int]:
+    # Read the UNet's input channel count (4 = regular, 9 = inpaint). Some
+    # community inpaint models ship a model_index.json whose _class_name is the
+    # plain StableDiffusion(XL)Pipeline, so the pipeline class alone misclassifies
+    # them as non-inpaint; the UNet config is authoritative.
+    cfg = model_index_path.parent / "unet" / "config.json"
+    try:
+        with open(cfg, "r", encoding="utf-8") as f:
+            return json.load(f).get("in_channels")
+    except Exception:
+        return None
 
 
 @lru_cache(maxsize=512)
@@ -222,11 +288,19 @@ def scan_diffusers_models() -> List[ModelInfo]:
         if "PowerPaint" in name:
             model_type = ModelType.DIFFUSERS_OTHER
         elif _class_name == DIFFUSERS_SD_CLASS_NAME:
-            model_type = ModelType.DIFFUSERS_SD
+            # A 9-channel UNet means it's really an inpaint model, even if the
+            # pipeline class says otherwise.
+            if _diffusers_unet_in_channels(it) == 9:
+                model_type = ModelType.DIFFUSERS_SD_INPAINT
+            else:
+                model_type = ModelType.DIFFUSERS_SD
         elif _class_name == DIFFUSERS_SD_INPAINT_CLASS_NAME:
             model_type = ModelType.DIFFUSERS_SD_INPAINT
         elif _class_name == DIFFUSERS_SDXL_CLASS_NAME:
-            model_type = ModelType.DIFFUSERS_SDXL
+            if _diffusers_unet_in_channels(it) == 9:
+                model_type = ModelType.DIFFUSERS_SDXL_INPAINT
+            else:
+                model_type = ModelType.DIFFUSERS_SDXL
         elif _class_name == DIFFUSERS_SDXL_INPAINT_CLASS_NAME:
             model_type = ModelType.DIFFUSERS_SDXL_INPAINT
         elif _class_name in [
@@ -273,11 +347,17 @@ def _scan_converted_diffusers_models(cache_dir) -> List[ModelInfo]:
             if name in diffusers_model_names:
                 continue
             elif _class_name == DIFFUSERS_SD_CLASS_NAME:
-                model_type = ModelType.DIFFUSERS_SD
+                if _diffusers_unet_in_channels(it) == 9:
+                    model_type = ModelType.DIFFUSERS_SD_INPAINT
+                else:
+                    model_type = ModelType.DIFFUSERS_SD
             elif _class_name == DIFFUSERS_SD_INPAINT_CLASS_NAME:
                 model_type = ModelType.DIFFUSERS_SD_INPAINT
             elif _class_name == DIFFUSERS_SDXL_CLASS_NAME:
-                model_type = ModelType.DIFFUSERS_SDXL
+                if _diffusers_unet_in_channels(it) == 9:
+                    model_type = ModelType.DIFFUSERS_SDXL_INPAINT
+                else:
+                    model_type = ModelType.DIFFUSERS_SDXL
             elif _class_name == DIFFUSERS_SDXL_INPAINT_CLASS_NAME:
                 model_type = ModelType.DIFFUSERS_SDXL_INPAINT
             else:

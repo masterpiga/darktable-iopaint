@@ -16,28 +16,18 @@ import {
   FormLabel,
 } from "@/components/ui/form"
 import { Switch } from "./ui/switch"
-import { Tabs, TabsContent, TabsList, TabsTrigger } from "./ui/tabs"
 import { useEffect, useState } from "react"
 import { cn } from "@/lib/utils"
 import { useQuery } from "@tanstack/react-query"
-import { getServerConfig, switchModel, switchPluginModel } from "@/lib/api"
-import { ModelInfo, PluginName } from "@/lib/types"
+import { getServerConfig, switchPluginModel } from "@/lib/api"
+import { PluginName } from "@/lib/types"
 import { useStore } from "@/lib/states"
-import { ScrollArea } from "./ui/scroll-area"
 import { useToast } from "./ui/use-toast"
 import {
   AlertDialog,
   AlertDialogContent,
   AlertDialogHeader,
 } from "./ui/alert-dialog"
-import {
-  MODEL_TYPE_DIFFUSERS_SD,
-  MODEL_TYPE_DIFFUSERS_SDXL,
-  MODEL_TYPE_DIFFUSERS_SDXL_INPAINT,
-  MODEL_TYPE_DIFFUSERS_SD_INPAINT,
-  MODEL_TYPE_INPAINT,
-  MODEL_TYPE_OTHER,
-} from "@/lib/const"
 import useHotKey from "@/hooks/useHotkey"
 import {
   Select,
@@ -62,37 +52,30 @@ const formSchema = z.object({
 })
 
 const TAB_GENERAL = "General"
-const TAB_MODEL = "Model"
 const TAB_PLUGINS = "Plugins"
 // const TAB_FILE_MANAGER = "File Manager"
 
-const TAB_NAMES = [TAB_MODEL, TAB_GENERAL, TAB_PLUGINS]
+const TAB_NAMES = [TAB_GENERAL, TAB_PLUGINS]
 
 export function SettingsDialog() {
   const [open, toggleOpen] = useToggle(false)
-  const [tab, setTab] = useState(TAB_MODEL)
+  const [tab, setTab] = useState(TAB_GENERAL)
   const [
     updateAppState,
     settings,
     updateSettings,
     fileManagerState,
-    setAppModel,
     setServerConfig,
   ] = useStore((state) => [
     state.updateAppState,
     state.settings,
     state.updateSettings,
     state.fileManagerState,
-    state.setModel,
     state.setServerConfig,
   ])
   const { toast } = useToast()
-  const [model, setModel] = useState<ModelInfo>(settings.model)
   const [modelSwitchingTexts, setModelSwitchingTexts] = useState<string[]>([])
   const openModelSwitching = modelSwitchingTexts.length > 0
-  useEffect(() => {
-    setModel(settings.model)
-  }, [settings.model])
 
   const {
     data: serverConfig,
@@ -143,7 +126,6 @@ export function SettingsDialog() {
     //   outputDirectory: values.outputDirectory,
     // })
 
-    const shouldSwitchModel = model.name !== settings.model.name
     const shouldSwitchRemoveBGModel =
       serverConfig?.removeBGModel !== values.removeBGModel && removeBGEnabled
     const shouldSwitchRealesrganModel =
@@ -154,18 +136,12 @@ export function SettingsDialog() {
       interactiveSegEnabled
 
     const showModelSwitching =
-      shouldSwitchModel ||
       shouldSwitchRemoveBGModel ||
       shouldSwitchRealesrganModel ||
       shouldSwitchInteractiveModel
 
     if (showModelSwitching) {
       const newModelSwitchingTexts: string[] = []
-      if (shouldSwitchModel) {
-        newModelSwitchingTexts.push(
-          `Switching model from ${settings.model.name} to ${model.name}`
-        )
-      }
       if (shouldSwitchRemoveBGModel) {
         newModelSwitchingTexts.push(
           `Switching RemoveBG model from ${serverConfig?.removeBGModel} to ${values.removeBGModel}`
@@ -184,22 +160,6 @@ export function SettingsDialog() {
       setModelSwitchingTexts(newModelSwitchingTexts)
 
       updateAppState({ disableShortCuts: true })
-
-      if (shouldSwitchModel) {
-        try {
-          const newModel = await switchModel(model.name)
-          toast({
-            title: `Switch to ${newModel.name} success`,
-          })
-          setAppModel(model)
-        } catch (error: any) {
-          toast({
-            variant: "destructive",
-            title: `Switch to ${model.name} failed: ${error}`,
-          })
-          setModel(settings.model)
-        }
-      }
 
       if (shouldSwitchRemoveBGModel) {
         try {
@@ -267,14 +227,13 @@ export function SettingsDialog() {
         onSubmit(form.getValues())
       }
     },
-    [open, form, model, serverConfig]
+    [open, form, serverConfig]
   )
 
   if (status !== "success") {
     return <></>
   }
 
-  const modelInfos = serverConfig.modelInfos
   const plugins = serverConfig.plugins
   const removeBGEnabled = plugins.some(
     (plugin) => plugin.name === PluginName.RemoveBG
@@ -291,108 +250,6 @@ export function SettingsDialog() {
     if (!value) {
       onSubmit(form.getValues())
     }
-  }
-
-  function onModelSelect(info: ModelInfo) {
-    setModel(info)
-  }
-
-  function renderModelList(model_types: string[]) {
-    if (!modelInfos) {
-      return <div>Please download model first</div>
-    }
-    return modelInfos
-      .filter((info) => model_types.includes(info.model_type))
-      .map((info: ModelInfo) => {
-        return (
-          <div
-            key={info.name}
-            onClick={() => onModelSelect(info)}
-            className="px-2"
-          >
-            <div
-              className={cn([
-                info.name === model.name ? "bg-muted" : "hover:bg-muted",
-                "rounded-md px-2 py-2",
-                "cursor-default",
-              ])}
-            >
-              <div className="text-base">{info.name}</div>
-            </div>
-            <Separator className="my-1" />
-          </div>
-        )
-      })
-  }
-
-  function renderModelSettings() {
-    let defaultTab = MODEL_TYPE_INPAINT
-    for (let info of modelInfos) {
-      if (model.name === info.name) {
-        defaultTab = info.model_type
-        if (defaultTab === MODEL_TYPE_DIFFUSERS_SDXL) {
-          defaultTab = MODEL_TYPE_DIFFUSERS_SD
-        }
-        if (defaultTab === MODEL_TYPE_DIFFUSERS_SDXL_INPAINT) {
-          defaultTab = MODEL_TYPE_DIFFUSERS_SD_INPAINT
-        }
-        break
-      }
-    }
-
-    return (
-      <div className="flex flex-col gap-4 w-[510px]">
-        <div className="flex flex-col gap-4 rounded-md">
-          <div className="font-medium">Current Model</div>
-          <div>{model.name}</div>
-        </div>
-
-        <Separator />
-
-        <div className="space-y-4  rounded-md">
-          <div className="flex gap-1 items-center justify-start">
-            <div className="font-medium">Available models</div>
-            {/* <IconButton tooltip="How to download new model">
-              <Info size={20} strokeWidth={2} className="opacity-50" />
-            </IconButton> */}
-          </div>
-          <Tabs defaultValue={defaultTab}>
-            <TabsList>
-              <TabsTrigger value={MODEL_TYPE_INPAINT}>Inpaint</TabsTrigger>
-              <TabsTrigger value={MODEL_TYPE_DIFFUSERS_SD}>
-                Stable Diffusion
-              </TabsTrigger>
-              <TabsTrigger value={MODEL_TYPE_DIFFUSERS_SD_INPAINT}>
-                Stable Diffusion Inpaint
-              </TabsTrigger>
-              <TabsTrigger value={MODEL_TYPE_OTHER}>
-                Other Diffusion
-              </TabsTrigger>
-            </TabsList>
-            <ScrollArea className="h-[240px] w-full mt-2 outline-none border rounded-lg">
-              <TabsContent value={MODEL_TYPE_INPAINT}>
-                {renderModelList([MODEL_TYPE_INPAINT])}
-              </TabsContent>
-              <TabsContent value={MODEL_TYPE_DIFFUSERS_SD}>
-                {renderModelList([
-                  MODEL_TYPE_DIFFUSERS_SD,
-                  MODEL_TYPE_DIFFUSERS_SDXL,
-                ])}
-              </TabsContent>
-              <TabsContent value={MODEL_TYPE_DIFFUSERS_SD_INPAINT}>
-                {renderModelList([
-                  MODEL_TYPE_DIFFUSERS_SD_INPAINT,
-                  MODEL_TYPE_DIFFUSERS_SDXL_INPAINT,
-                ])}
-              </TabsContent>
-              <TabsContent value={MODEL_TYPE_OTHER}>
-                {renderModelList([MODEL_TYPE_OTHER])}
-              </TabsContent>
-            </ScrollArea>
-          </Tabs>
-        </div>
-      </div>
-    )
   }
 
   function renderGeneralSettings() {
@@ -741,7 +598,6 @@ export function SettingsDialog() {
             <Form {...form}>
               <div className="flex w-full justify-center">
                 <form onSubmit={form.handleSubmit(onSubmit)}>
-                  {tab === TAB_MODEL ? renderModelSettings() : <></>}
                   {tab === TAB_GENERAL ? renderGeneralSettings() : <></>}
                   {tab === TAB_PLUGINS ? renderPluginsSettings() : <></>}
                   {/* {tab === TAB_FILE_MANAGER ? (
