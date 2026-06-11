@@ -23,3 +23,53 @@ export const DEFAULT_NEGATIVE_PROMPT =
   "out of frame, lowres, error, cropped, worst quality, low quality, jpeg artifacts, ugly, duplicate, morbid, mutilated, out of frame, mutation, deformed, blurry, dehydrated, bad anatomy, bad proportions, extra limbs, disfigured, gross proportions, malformed limbs, watermark, signature"
 
 export const SHORTCUT_KEY_CHANGE_BRUSH_SIZE = "Alt"
+
+// Per-model-type defaults for the patch-fill sliding window
+// (size / overlap / context padding, in pixels). SDXL prefers a larger
+// native window; everything else works well around 512.
+export interface PatchDefaults {
+  patchSize: number
+  patchOverlap: number
+  patchContextPad: number
+}
+
+// Note: overlap must exceed 2 × contextPad so that the inpainted interiors of
+// neighbouring tiles overlap and can be feather-blended.
+export const PATCH_DEFAULTS_BY_MODEL_TYPE: Record<string, PatchDefaults> = {
+  [MODEL_TYPE_INPAINT]: {
+    patchSize: 512,
+    patchOverlap: 128,
+    patchContextPad: 32,
+  },
+  [MODEL_TYPE_DIFFUSERS_SD]: {
+    patchSize: 512,
+    patchOverlap: 128,
+    patchContextPad: 32,
+  },
+  [MODEL_TYPE_DIFFUSERS_SD_INPAINT]: {
+    patchSize: 512,
+    patchOverlap: 128,
+    patchContextPad: 32,
+  },
+  [MODEL_TYPE_DIFFUSERS_SDXL]: {
+    patchSize: 1024,
+    patchOverlap: 256,
+    patchContextPad: 64,
+  },
+  [MODEL_TYPE_DIFFUSERS_SDXL_INPAINT]: {
+    patchSize: 1024,
+    patchOverlap: 256,
+    patchContextPad: 64,
+  },
+  [MODEL_TYPE_OTHER]: {
+    patchSize: 512,
+    patchOverlap: 128,
+    patchContextPad: 32,
+  },
+}
+
+export const DEFAULT_PATCH_DEFAULTS: PatchDefaults = {
+  patchSize: 512,
+  patchOverlap: 128,
+  patchContextPad: 32,
+}

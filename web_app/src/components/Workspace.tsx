@@ -4,6 +4,7 @@ import { currentModel } from "@/lib/api"
 import { useStore } from "@/lib/states"
 import ImageSize from "./ImageSize"
 import Plugins from "./Plugins"
+import PatchFill from "./PatchFill"
 import { InteractiveSeg } from "./InteractiveSeg"
 import SidePanel from "./SidePanel"
 import DiffusionProgress from "./DiffusionProgress"
@@ -24,9 +25,10 @@ const Workspace = () => {
 
   return (
     <>
-      <div className="flex gap-3 absolute top-[68px] left-[24px] items-center">
+      <div className="flex gap-3 absolute top-[68px] left-[24px] items-center z-20">
         <Plugins />
         <ImageSize />
+        {file ? <PatchFill /> : <></>}
       </div>
       <InteractiveSeg />
       <DiffusionProgress />

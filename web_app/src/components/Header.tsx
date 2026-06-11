@@ -14,6 +14,7 @@ import SettingsDialog from "./Settings"
 import PresetSelect from "./PresetSelect"
 import ModelManager from "./ModelManager"
 import LogsDialog from "./LogsDialog"
+import HistoryPanel from "./HistoryPanel"
 import { cn, fileToImage } from "@/lib/utils"
 import { useToast } from "./ui/use-toast"
 
@@ -197,6 +198,7 @@ const Header = () => {
       <div className="flex gap-1">
         <ModelManager />
         <PresetSelect />
+        {file ? <HistoryPanel /> : <></>}
         <LogsDialog />
         <Shortcuts />
         {serverConfig.disableModelSwitch ? <></> : <SettingsDialog />}

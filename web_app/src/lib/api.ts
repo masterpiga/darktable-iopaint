@@ -7,7 +7,7 @@ import {
   ServerConfig,
 } from "@/lib/types"
 import { Preset, Settings } from "@/lib/states"
-import { convertToBase64, srcToFile } from "@/lib/utils"
+import { canvasToFile, convertToBase64, srcToFile } from "@/lib/utils"
 import axios from "axios"
 
 export const API_ENDPOINT = import.meta.env.DEV
@@ -31,7 +31,10 @@ export default async function inpaint(
   croperRect: Rect,
   extenderState: Rect,
   mask: File | Blob,
-  paintByExampleImage: File | null = null
+  paintByExampleImage: File | null = null,
+  // Patch-fill drives the cropper per tile, independent of settings.showCropper,
+  // so diffusion models process each tile at native resolution.
+  forceCroper = false
 ) {
   const imageBase64 = await convertToBase64(imageFile)
   const maskBase64 = await convertToBase64(mask)
@@ -58,7 +61,7 @@ export default async function inpaint(
       hd_strategy_resize_limit: 2048,
       prompt: settings.prompt,
       negative_prompt: settings.negativePrompt,
-      use_croper: settings.showCropper,
+      use_croper: forceCroper || settings.showCropper,
       croper_x: croperRect.x,
       croper_y: croperRect.y,
       croper_height: croperRect.height,
@@ -234,11 +237,14 @@ export async function getMedias(tab: string): Promise<Filename[]> {
 }
 
 export async function downloadToOutput(
-  image: HTMLImageElement,
+  image: HTMLImageElement | HTMLCanvasElement,
   filename: string,
   mimeType: string
 ) {
-  const file = await srcToFile(image.src, filename, mimeType)
+  const file =
+    image instanceof HTMLCanvasElement
+      ? await canvasToFile(image, filename, mimeType)
+      : await srcToFile(image.src, filename, mimeType)
   const fd = new FormData()
   fd.append("file", file)
 

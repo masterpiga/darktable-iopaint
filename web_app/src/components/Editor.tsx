@@ -1,4 +1,11 @@
-import { SyntheticEvent, useCallback, useEffect, useRef, useState } from "react"
+import {
+  SyntheticEvent,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react"
 import { CursorArrowRaysIcon } from "@heroicons/react/24/outline"
 import { useToast } from "@/components/ui/use-toast"
 import {
@@ -11,7 +18,11 @@ import { downloadToOutput, runPlugin } from "@/lib/api"
 import { IconButton } from "@/components/ui/button"
 import {
   askWritePermission,
+  bboxFromLineGroup,
+  canvasToFile,
   cn,
+  composeEntries,
+  computeTiles,
   copyCanvasImage,
   downloadImage,
   drawLines,
@@ -19,12 +30,11 @@ import {
   isMidClick,
   isRightClick,
   mouseXY,
-  srcToFile,
 } from "@/lib/utils"
 import { Eraser, Eye, Redo, Undo, Expand, Download } from "lucide-react"
 import { useImage } from "@/hooks/useImage"
 import { Slider } from "./ui/slider"
-import { PluginName } from "@/lib/types"
+import { PatchEntry, PluginName } from "@/lib/types"
 import { useStore } from "@/lib/states"
 import Cropper from "./Cropper"
 import { InteractiveSegPoints } from "./InteractiveSeg"
@@ -100,15 +110,43 @@ export default function Editor(props: EditorProps) {
   ])
   const baseBrushSize = useStore((state) => state.editorState.baseBrushSize)
   const brushSize = useStore((state) => state.getBrushSize())
-  const renders = useStore((state) => state.editorState.renders)
+  const entries = useStore((state) => state.editorState.entries)
+  const headIndex = useStore((state) => state.editorState.headIndex)
   const extraMasks = useStore((state) => state.editorState.extraMasks)
   const temporaryMasks = useStore((state) => state.editorState.temporaryMasks)
-  const lineGroups = useStore((state) => state.editorState.lineGroups)
   const curLineGroup = useStore((state) => state.editorState.curLineGroup)
 
   // Local State
   const [showOriginal, setShowOriginal] = useState(false)
   const [original, isOriginalLoaded] = useImage(file)
+
+  // Has at least one applied edit in the timeline.
+  const hasActiveEntry = headIndex > 0
+
+  // Flattened composite of the active history entries, recomputed when the
+  // history changes. Null until the original image has loaded.
+  const composed = useMemo(() => {
+    if (!isOriginalLoaded) {
+      return null
+    }
+    return composeEntries(
+      original,
+      original.naturalWidth,
+      original.naturalHeight,
+      entries,
+      headIndex
+    )
+  }, [isOriginalLoaded, original, entries, headIndex])
+
+  // Mask stroke groups of the active patch entries (for the mask download).
+  const activeLineGroups = useMemo(
+    () =>
+      entries
+        .slice(0, headIndex)
+        .filter((e): e is PatchEntry => e.kind === "patch")
+        .map((e) => e.lineGroup),
+    [entries, headIndex]
+  )
   const [context, setContext] = useState<CanvasRenderingContext2D>()
   const [imageContext, setImageContext] = useState<CanvasRenderingContext2D>()
   const [{ x, y }, setCoords] = useState({ x: -1, y: -1 })
@@ -144,7 +182,7 @@ export default function Editor(props: EditorProps) {
     ) {
       return
     }
-    const render = renders.length === 0 ? original : renders[renders.length - 1]
+    const render = composed ? composed.canvas : original
     imageContext.canvas.width = imageWidth
     imageContext.canvas.height = imageHeight
 
@@ -156,7 +194,7 @@ export default function Editor(props: EditorProps) {
     )
     imageContext.drawImage(render, 0, 0, imageWidth, imageHeight)
   }, [
-    renders,
+    composed,
     original,
     isOriginalLoaded,
     imageContext,
@@ -196,6 +234,36 @@ export default function Editor(props: EditorProps) {
       )
     }
     drawLines(context, curLineGroup)
+
+    // Live preview of the patch-fill tile grid while drawing.
+    if (settings.patchFill) {
+      const bbox = bboxFromLineGroup(curLineGroup)
+      if (bbox) {
+        const tiles = computeTiles(bbox, {
+          tileSize: settings.patchSize,
+          overlap: settings.patchOverlap,
+          contextPad: settings.patchContextPad,
+          imageW: imageWidth,
+          imageH: imageHeight,
+        })
+        const dash = Math.max(4, imageWidth / 120)
+        context.save()
+        context.strokeStyle = "#00aaff"
+        context.lineWidth = Math.max(1, imageWidth / 500)
+        context.setLineDash([dash, dash])
+        tiles.forEach((t) => context.strokeRect(t.x, t.y, t.width, t.height))
+        context.setLineDash([])
+        context.fillStyle = "#00aaff"
+        const fontSize = Math.max(14, imageWidth / 50)
+        context.font = `${fontSize}px sans-serif`
+        context.fillText(
+          `${tiles.length} ${tiles.length === 1 ? "patch" : "patches"}`,
+          Math.max(0, bbox.x),
+          Math.max(fontSize, bbox.y - 4)
+        )
+        context.restore()
+      }
+    }
   }, [
     temporaryMasks,
     extraMasks,
@@ -205,19 +273,21 @@ export default function Editor(props: EditorProps) {
     curLineGroup,
     imageHeight,
     imageWidth,
+    settings.patchFill,
+    settings.patchSize,
+    settings.patchOverlap,
+    settings.patchContextPad,
   ])
 
   const getCurrentRender = useCallback(async () => {
-    let targetFile = file
-    if (renders.length > 0) {
-      const lastRender = renders[renders.length - 1]
-      targetFile = await srcToFile(lastRender.currentSrc, file.name, file.type)
+    if (!composed) {
+      return file
     }
-    return targetFile
-  }, [file, renders])
+    return canvasToFile(composed.canvas, file.name, file.type)
+  }, [file, composed])
 
   const hadRunInpainting = () => {
-    return renders.length !== 0
+    return hasActiveEntry
   }
 
   const getCurrentWidthHeight = useCallback(() => {
@@ -226,16 +296,16 @@ export default function Editor(props: EditorProps) {
     if (!isOriginalLoaded) {
       return [width, height]
     }
-    if (renders.length === 0) {
+    if (composed) {
+      width = composed.width
+      height = composed.height
+    } else {
       width = original.naturalWidth
       height = original.naturalHeight
-    } else if (renders.length !== 0) {
-      width = renders[renders.length - 1].width
-      height = renders[renders.length - 1].height
     }
 
     return [width, height]
-  }, [original, isOriginalLoaded, renders])
+  }, [original, isOriginalLoaded, composed])
 
   // Draw once the original image is loaded
   useEffect(() => {
@@ -525,16 +595,12 @@ export default function Editor(props: EditorProps) {
   )
 
   const download = useCallback(async () => {
-    if (file === undefined) {
+    if (file === undefined || !composed) {
       return
     }
-    if (enableAutoSaving && renders.length > 0) {
+    if (enableAutoSaving && hasActiveEntry) {
       try {
-        await downloadToOutput(
-          renders[renders.length - 1],
-          file.name,
-          file.type
-        )
+        await downloadToOutput(composed.canvas, file.name, file.type)
         toast({
           description: "Save image success",
         })
@@ -550,13 +616,12 @@ export default function Editor(props: EditorProps) {
 
     // TODO: download to output directory
     const name = file.name.replace(/(\.[\w\d_-]+)$/i, "_cleanup$1")
-    const curRender = renders[renders.length - 1]
-    downloadImage(curRender.currentSrc, name)
+    downloadImage(composed.canvas.toDataURL(), name)
     if (settings.enableDownloadMask) {
       let maskFileName = file.name.replace(/(\.[\w\d_-]+)$/i, "_mask$1")
       maskFileName = maskFileName.replace(/\.[^/.]+$/, ".jpg")
 
-      const maskCanvas = generateMask(imageWidth, imageHeight, lineGroups)
+      const maskCanvas = generateMask(imageWidth, imageHeight, activeLineGroups)
       // Create a link
       const aDownloadLink = document.createElement("a")
       // Add the name of the file to the link
@@ -568,12 +633,13 @@ export default function Editor(props: EditorProps) {
     }
   }, [
     file,
+    composed,
+    hasActiveEntry,
     enableAutoSaving,
-    renders,
     settings,
     imageHeight,
     imageWidth,
-    lineGroups,
+    activeLineGroups,
   ])
 
   useHotKey("meta+s,ctrl+s", download)
@@ -628,7 +694,7 @@ export default function Editor(props: EditorProps) {
     "ctrl+c,meta+c",
     async () => {
       const hasPermission = await askWritePermission()
-      if (hasPermission && renders.length > 0) {
+      if (hasPermission && hasActiveEntry) {
         if (context?.canvas) {
           await copyCanvasImage(context?.canvas)
           toast({
@@ -637,7 +703,7 @@ export default function Editor(props: EditorProps) {
         }
       }
     },
-    [renders, context]
+    [hasActiveEntry, context]
   )
 
   // Toggle clean/zoom tool on spacebar.
@@ -981,13 +1047,13 @@ export default function Editor(props: EditorProps) {
                 setShowOriginal(false)
               }, COMPARE_SLIDER_DURATION_MS)
             }}
-            disabled={renders.length === 0}
+            disabled={!hasActiveEntry}
           >
             <Eye />
           </IconButton>
           <IconButton
             tooltip="Save Image"
-            disabled={!renders.length}
+            disabled={!hasActiveEntry}
             onClick={download}
           >
             <Download />

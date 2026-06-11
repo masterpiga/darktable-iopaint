@@ -110,6 +110,34 @@ export interface Line {
 
 export type LineGroup = Array<Line>
 
+// A single, toggleable edit in the editor history.
+// `patch` covers a rectangular region of the current base (inpaint / tile);
+// `rebase` is a structural, size-changing op (outpaint / upscale plugin) whose
+// canvas becomes the new full base for subsequent patches.
+export interface PatchEntry {
+  kind: "patch"
+  id: string
+  enabled: boolean
+  bbox: Rect
+  canvas: HTMLCanvasElement
+  lineGroup: LineGroup
+  extraMasks: HTMLImageElement[]
+  batchId?: string
+  label: string
+}
+
+export interface RebaseEntry {
+  kind: "rebase"
+  id: string
+  enabled: true
+  canvas: HTMLCanvasElement
+  width: number
+  height: number
+  label: string
+}
+
+export type HistoryEntry = PatchEntry | RebaseEntry
+
 export interface Size {
   width: number
   height: number

@@ -7,6 +7,7 @@ import {
   AdjustMaskOperate,
   CV2Flag,
   ExtenderDirection,
+  HistoryEntry,
   LDMSampler,
   Line,
   LineGroup,
@@ -14,6 +15,7 @@ import {
   PluginParams,
   Point,
   PowerPaintTask,
+  Rect,
   ServerConfig,
   Size,
   SortBy,
@@ -28,12 +30,21 @@ import {
   PAINT_BY_EXAMPLE,
 } from "./const"
 import {
+  bboxFromMaskCanvas,
   blobToImage,
+  canvasToFile,
   canvasToImage,
+  clampRect,
+  clipMaskToRect,
+  composeEntries,
+  computeTiles,
+  cropToCanvas,
   dataURItoBlob,
+  featherPatch,
+  fileToImage,
   generateMask,
   loadImage,
-  srcToFile,
+  maskIntersectsRect,
 } from "./utils"
 import inpaint, {
   getGenInfo,
@@ -69,6 +80,13 @@ export type Settings = {
   showCropper: boolean
   showExtender: boolean
   extenderDirection: ExtenderDirection
+
+  // Patch fill (auto-tile): cover a large masked area with a sliding window of
+  // overlapping patches, processed sequentially.
+  patchFill: boolean
+  patchSize: number
+  patchOverlap: number
+  patchContextPad: number
 
   // For LDM
   ldmSteps: number
@@ -138,8 +156,14 @@ type InteractiveSegState = {
 type EditorState = {
   baseBrushSize: number
   brushSizeScale: number
-  renders: HTMLImageElement[]
-  lineGroups: LineGroup[]
+
+  // Decoded original image; base for compositing the history entries.
+  originalImage: HTMLImageElement | null
+  // Ordered, toggleable edit history. Entries with index < headIndex are
+  // "in the timeline" (undo); entries >= headIndex are undone (redoable).
+  entries: HistoryEntry[]
+  headIndex: number
+
   lastLineGroup: LineGroup
   curLineGroup: LineGroup
 
@@ -148,10 +172,8 @@ type EditorState = {
   prevExtraMasks: HTMLImageElement[]
 
   temporaryMasks: HTMLImageElement[]
-  // redo 相关
-  redoRenders: HTMLImageElement[]
+  // redo for manual single strokes
   redoCurLines: Line[]
-  redoLineGroups: LineGroup[]
 }
 
 type AppState = {
@@ -163,6 +185,8 @@ type AppState = {
   isInpainting: boolean
   isPluginRunning: boolean
   isAdjustingMask: boolean
+  // Progress of an in-flight patch-fill run, null when idle.
+  patchProgress: { total: number; done: number } | null
   windowSize: Size
   editorState: EditorState
   disableShortCuts: boolean
@@ -237,6 +261,7 @@ type AppAction = {
   showPromptInput: () => boolean
 
   runInpainting: () => Promise<void>
+  runAutoTile: () => Promise<void>
   showPrevMask: () => Promise<void>
   hidePrevMask: () => void
   runRenderablePlugin: (
@@ -247,6 +272,11 @@ type AppAction = {
 
   // EditorState
   getCurrentTargetFile: () => Promise<File>
+  getComposedCanvas: () => HTMLCanvasElement | null
+  hasActiveEntry: () => boolean
+  ensureOriginalImage: () => Promise<HTMLImageElement | null>
+  togglePatch: (id: string) => void
+  setBatchEnabled: (batchId: string, enabled: boolean) => void
   updateEditorState: (newState: Partial<EditorState>) => void
   runMannually: () => boolean
   handleCanvasMouseDown: (point: Point) => void
@@ -271,6 +301,7 @@ const defaultValues: AppState = {
   isInpainting: false,
   isPluginRunning: false,
   isAdjustingMask: false,
+  patchProgress: null,
   disableShortCuts: false,
 
   windowSize: {
@@ -280,16 +311,15 @@ const defaultValues: AppState = {
   editorState: {
     baseBrushSize: DEFAULT_BRUSH_SIZE,
     brushSizeScale: 1,
-    renders: [],
+    originalImage: null,
+    entries: [],
+    headIndex: 0,
     extraMasks: [],
     prevExtraMasks: [],
     temporaryMasks: [],
-    lineGroups: [],
     lastLineGroup: [],
     curLineGroup: [],
-    redoRenders: [],
     redoCurLines: [],
-    redoLineGroups: [],
   },
 
   interactiveSegState: {
@@ -356,6 +386,10 @@ const defaultValues: AppState = {
     showCropper: false,
     showExtender: false,
     extenderDirection: ExtenderDirection.xy,
+    patchFill: false,
+    patchSize: 512,
+    patchOverlap: 128,
+    patchContextPad: 32,
     enableDownloadMask: false,
     enableManualInpainting: false,
     enableUploadMask: false,
@@ -390,6 +424,12 @@ const defaultValues: AppState = {
   },
 
   presets: [],
+}
+
+let entrySeq = 0
+function genId(): string {
+  entrySeq += 1
+  return `e${Date.now().toString(36)}-${entrySeq}`
 }
 
 export const useStore = createWithEqualityFn<AppState & AppAction>()(
@@ -431,20 +471,78 @@ export const useStore = createWithEqualityFn<AppState & AppAction>()(
         })
       },
 
+      getComposedCanvas: (): HTMLCanvasElement | null => {
+        const { originalImage, entries, headIndex } = get().editorState
+        if (!originalImage) {
+          return null
+        }
+        const { canvas } = composeEntries(
+          originalImage,
+          originalImage.naturalWidth,
+          originalImage.naturalHeight,
+          entries,
+          headIndex
+        )
+        return canvas
+      },
+
+      hasActiveEntry: (): boolean => {
+        return get().editorState.headIndex > 0
+      },
+
+      // Returns the decoded original image, decoding+caching it on demand so the
+      // history compositing (and per-tile feed-forward) can never silently fall
+      // back to the raw file.
+      ensureOriginalImage: async (): Promise<HTMLImageElement | null> => {
+        const existing = get().editorState.originalImage
+        if (existing) {
+          return existing
+        }
+        const file = get().file
+        if (!file) {
+          return null
+        }
+        try {
+          const image = await fileToImage(file)
+          set((state) => {
+            state.editorState.originalImage = castDraft(image)
+          })
+          return image
+        } catch (e) {
+          console.error(e)
+          return null
+        }
+      },
+
+      togglePatch: (id: string) => {
+        set((state) => {
+          const entry = state.editorState.entries.find((e) => e.id === id)
+          if (entry && entry.kind === "patch") {
+            entry.enabled = !entry.enabled
+          }
+        })
+      },
+
+      setBatchEnabled: (batchId: string, enabled: boolean) => {
+        set((state) => {
+          state.editorState.entries.forEach((entry) => {
+            if (entry.kind === "patch" && entry.batchId === batchId) {
+              entry.enabled = enabled
+            }
+          })
+        })
+      },
+
       getCurrentTargetFile: async (): Promise<File> => {
         const file = get().file! // 一定是在 file 加载了以后才可能调用这个函数
-        const renders = get().editorState.renders
-
-        let targetFile = file
-        if (renders.length > 0) {
-          const lastRender = renders[renders.length - 1]
-          targetFile = await srcToFile(
-            lastRender.currentSrc,
-            file.name,
-            file.type
-          )
+        if (get().editorState.headIndex === 0) {
+          return file
         }
-        return targetFile
+        const canvas = get().getComposedCanvas()
+        if (!canvas) {
+          return file
+        }
+        return canvasToFile(canvas, file.name, file.type)
       },
 
       runInpainting: async () => {
@@ -472,23 +570,35 @@ export const useStore = createWithEqualityFn<AppState & AppAction>()(
           return
         }
 
+        // Patch-fill: tile the whole masked area instead of a single pass.
+        if (
+          settings.patchFill &&
+          !settings.showExtender &&
+          (get().editorState.curLineGroup.length > 0 ||
+            get().editorState.extraMasks.length > 0)
+        ) {
+          await get().runAutoTile()
+          return
+        }
+
         const {
           lastLineGroup,
           curLineGroup,
-          lineGroups,
-          renders,
+          entries,
+          headIndex,
           prevExtraMasks,
           extraMasks,
         } = get().editorState
+        const originalImage = await get().ensureOriginalImage()
 
         const useLastLineGroup =
           curLineGroup.length === 0 &&
           extraMasks.length === 0 &&
           !settings.showExtender
 
-        // useLastLineGroup 的影响
-        // 1. 使用上一次的 mask
-        // 2. 结果替换当前 render
+        // useLastLineGroup:
+        // 1. re-use the previous mask
+        // 2. re-roll the most recent patch in place (rather than stacking)
         let maskImages: HTMLImageElement[] = []
         let maskLineGroup: LineGroup = []
         if (useLastLineGroup === true) {
@@ -501,7 +611,7 @@ export const useStore = createWithEqualityFn<AppState & AppAction>()(
 
         if (
           maskLineGroup.length === 0 &&
-          maskImages === null &&
+          maskImages.length === 0 &&
           !settings.showExtender
         ) {
           toast({
@@ -511,30 +621,29 @@ export const useStore = createWithEqualityFn<AppState & AppAction>()(
           return
         }
 
-        const newLineGroups = [...lineGroups, maskLineGroup]
+        const lastEntry = entries[headIndex - 1]
+        const isReroll =
+          useLastLineGroup &&
+          lastEntry !== undefined &&
+          lastEntry.kind === "patch"
+        // The re-roll re-processes the region beneath the last patch, so its
+        // input is the composite excluding that patch.
+        const inputCount = isReroll ? headIndex - 1 : headIndex
 
         set((state) => {
           state.isInpainting = true
         })
 
         let targetFile = file
-        if (useLastLineGroup === true) {
-          // renders.length == 1 还是用原来的
-          if (renders.length > 1) {
-            const lastRender = renders[renders.length - 2]
-            targetFile = await srcToFile(
-              lastRender.currentSrc,
-              file.name,
-              file.type
-            )
-          }
-        } else if (renders.length > 0) {
-          const lastRender = renders[renders.length - 1]
-          targetFile = await srcToFile(
-            lastRender.currentSrc,
-            file.name,
-            file.type
+        if (originalImage && inputCount > 0) {
+          const { canvas } = composeEntries(
+            originalImage,
+            originalImage.naturalWidth,
+            originalImage.naturalHeight,
+            entries,
+            inputCount
           )
+          targetFile = await canvasToFile(canvas, file.name, file.type)
         }
 
         const maskCanvas = generateMask(
@@ -567,11 +676,72 @@ export const useStore = createWithEqualityFn<AppState & AppAction>()(
           }
           const newRender = new Image()
           await loadImage(newRender, blob)
-          const newRenders = [...renders, newRender]
           get().setImageSize(newRender.width, newRender.height)
+
+          if (settings.showExtender) {
+            // Outpainting changes the canvas size -> structural rebase entry.
+            const rebase: HistoryEntry = {
+              kind: "rebase",
+              id: genId(),
+              enabled: true,
+              canvas: cropToCanvas(newRender, {
+                x: 0,
+                y: 0,
+                width: newRender.width,
+                height: newRender.height,
+              }),
+              width: newRender.width,
+              height: newRender.height,
+              label: "Outpaint",
+            }
+            set((state) => {
+              state.editorState.entries = castDraft([
+                ...state.editorState.entries.slice(
+                  0,
+                  state.editorState.headIndex
+                ),
+                rebase,
+              ])
+              state.editorState.headIndex += 1
+            })
+          } else {
+            const bbox =
+              (settings.showCropper
+                ? clampRect(cropperState, newRender.width, newRender.height)
+                : bboxFromMaskCanvas(maskCanvas, settings.sdMaskBlur)) ?? {
+                x: 0,
+                y: 0,
+                width: newRender.width,
+                height: newRender.height,
+              }
+            const patch: HistoryEntry = {
+              kind: "patch",
+              id: genId(),
+              enabled: true,
+              bbox,
+              canvas: cropToCanvas(newRender, bbox),
+              lineGroup: maskLineGroup,
+              extraMasks: maskImages,
+              label: "Inpaint",
+            }
+            set((state) => {
+              if (isReroll) {
+                state.editorState.entries[state.editorState.headIndex - 1] =
+                  castDraft(patch)
+              } else {
+                state.editorState.entries = castDraft([
+                  ...state.editorState.entries.slice(
+                    0,
+                    state.editorState.headIndex
+                  ),
+                  patch,
+                ])
+                state.editorState.headIndex += 1
+              }
+            })
+          }
+
           get().updateEditorState({
-            renders: newRenders,
-            lineGroups: newLineGroups,
             lastLineGroup: maskLineGroup,
             curLineGroup: [],
             extraMasks: [],
@@ -591,12 +761,178 @@ export const useStore = createWithEqualityFn<AppState & AppAction>()(
         })
       },
 
+      runAutoTile: async () => {
+        const {
+          file,
+          paintByExampleFile,
+          imageWidth,
+          imageHeight,
+          settings,
+          extenderState,
+        } = get()
+        if (file === null) {
+          return
+        }
+        const { curLineGroup, extraMasks } = get().editorState
+        const originalImage = await get().ensureOriginalImage()
+
+        // Full mask covering the area the user wants filled.
+        const maskCanvas = generateMask(
+          imageWidth,
+          imageHeight,
+          [curLineGroup],
+          extraMasks,
+          BRUSH_COLOR
+        )
+        // computeTiles applies the context padding; keep this bbox tight.
+        const maskBbox = bboxFromMaskCanvas(maskCanvas, 0)
+        if (!maskBbox) {
+          toast({
+            variant: "destructive",
+            description: "Please draw mask on picture",
+          })
+          return
+        }
+
+        const pad = settings.patchContextPad
+
+        // Inset a tile's mask on edges that face other tiles (not the image
+        // border), so each tile keeps an unmasked `pad`-wide context ring. This
+        // is what gives a diffusion model something to condition on — a fully
+        // masked tile would otherwise come back black. The ring's masked pixels
+        // are covered by the neighbouring tile where they are interior.
+        const innerMaskRect = (tile: Rect): Rect => {
+          const left = tile.x <= 0 ? 0 : pad
+          const top = tile.y <= 0 ? 0 : pad
+          const right = tile.x + tile.width >= imageWidth ? 0 : pad
+          const bottom = tile.y + tile.height >= imageHeight ? 0 : pad
+          return {
+            x: tile.x + left,
+            y: tile.y + top,
+            width: Math.max(0, tile.width - left - right),
+            height: Math.max(0, tile.height - top - bottom),
+          }
+        }
+
+        const tiles = computeTiles(maskBbox, {
+          tileSize: settings.patchSize,
+          overlap: settings.patchOverlap,
+          contextPad: pad,
+          imageW: imageWidth,
+          imageH: imageHeight,
+        }).filter((tile) => maskIntersectsRect(maskCanvas, innerMaskRect(tile)))
+
+        if (tiles.length === 0) {
+          toast({
+            variant: "destructive",
+            description: "Please draw mask on picture",
+          })
+          return
+        }
+
+        const batchId = genId()
+        const total = tiles.length
+
+        // Drop any redoable tail before appending the batch.
+        set((state) => {
+          state.isInpainting = true
+          state.patchProgress = { total, done: 0 }
+          state.editorState.entries = castDraft(
+            state.editorState.entries.slice(0, state.editorState.headIndex)
+          )
+        })
+
+        try {
+          for (let i = 0; i < tiles.length; i += 1) {
+            const tile = tiles[i]
+
+            // Compose the current timeline (includes earlier tiles) as input,
+            // so each tile's context ring uses already-improved pixels.
+            let targetFile = file
+            const { entries: curEntries, headIndex: curHead } =
+              get().editorState
+            if (originalImage && curHead > 0) {
+              const { canvas } = composeEntries(
+                originalImage,
+                originalImage.naturalWidth,
+                originalImage.naturalHeight,
+                curEntries,
+                curHead
+              )
+              targetFile = await canvasToFile(canvas, file.name, file.type)
+            }
+
+            const tileMask = clipMaskToRect(maskCanvas, innerMaskRect(tile))
+            const res = await inpaint(
+              targetFile,
+              settings,
+              tile,
+              extenderState,
+              dataURItoBlob(tileMask.toDataURL()),
+              paintByExampleFile,
+              true
+            )
+            const { blob, seed } = res
+            if (seed) {
+              get().setSeed(parseInt(seed, 10))
+            }
+            const newRender = new Image()
+            await loadImage(newRender, blob)
+
+            const bbox = clampRect(tile, newRender.width, newRender.height)
+            // Feather inner edges so overlapping tiles cross-fade instead of
+            // showing a hard rectangular seam.
+            const patchCanvas = featherPatch(cropToCanvas(newRender, bbox), pad, {
+              left: bbox.x > 0,
+              top: bbox.y > 0,
+              right: bbox.x + bbox.width < imageWidth,
+              bottom: bbox.y + bbox.height < imageHeight,
+            })
+            const patch: HistoryEntry = {
+              kind: "patch",
+              id: genId(),
+              enabled: true,
+              bbox,
+              canvas: patchCanvas,
+              lineGroup: curLineGroup,
+              extraMasks,
+              batchId,
+              label: `Patch ${i + 1}/${total}`,
+            }
+            set((state) => {
+              state.editorState.entries.push(castDraft(patch))
+              state.editorState.headIndex += 1
+              if (state.patchProgress) {
+                state.patchProgress.done = i + 1
+              }
+            })
+          }
+
+          get().updateEditorState({
+            lastLineGroup: curLineGroup,
+            curLineGroup: [],
+            extraMasks: [],
+            prevExtraMasks: extraMasks,
+          })
+        } catch (e: any) {
+          toast({
+            variant: "destructive",
+            description: e.message ? e.message : e.toString(),
+          })
+        }
+
+        get().resetRedoState()
+        set((state) => {
+          state.isInpainting = false
+          state.patchProgress = null
+        })
+      },
+
       runRenderablePlugin: async (
         genMask: boolean,
         pluginName: string,
         params: PluginParams = { upscale: 1 }
       ) => {
-        const { renders, lineGroups } = get().editorState
         set((state) => {
           state.isPluginRunning = true
         })
@@ -616,11 +952,30 @@ export const useStore = createWithEqualityFn<AppState & AppAction>()(
             const newRender = new Image()
             await loadImage(newRender, blob)
             get().setImageSize(newRender.width, newRender.height)
-            const newRenders = [...renders, newRender]
-            const newLineGroups = [...lineGroups, []]
-            get().updateEditorState({
-              renders: newRenders,
-              lineGroups: newLineGroups,
+            // Plugins (upscale / restore) may resize -> structural rebase entry.
+            const rebase: HistoryEntry = {
+              kind: "rebase",
+              id: genId(),
+              enabled: true,
+              canvas: cropToCanvas(newRender, {
+                x: 0,
+                y: 0,
+                width: newRender.width,
+                height: newRender.height,
+              }),
+              width: newRender.width,
+              height: newRender.height,
+              label: pluginName,
+            }
+            set((state) => {
+              state.editorState.entries = castDraft([
+                ...state.editorState.entries.slice(
+                  0,
+                  state.editorState.headIndex
+                ),
+                rebase,
+              ])
+              state.editorState.headIndex += 1
             })
           } else {
             const newMask = new Image()
@@ -699,17 +1054,13 @@ export const useStore = createWithEqualityFn<AppState & AppAction>()(
 
       undoDisabled: (): boolean => {
         const editorState = get().editorState
-        if (editorState.renders.length > 0) {
+        if (
+          get().runMannually() &&
+          editorState.curLineGroup.length !== 0
+        ) {
           return false
         }
-        if (get().runMannually()) {
-          if (editorState.curLineGroup.length === 0) {
-            return true
-          }
-        } else if (editorState.renders.length === 0) {
-          return true
-        }
-        return false
+        return editorState.headIndex === 0
       },
 
       undo: () => {
@@ -730,36 +1081,37 @@ export const useStore = createWithEqualityFn<AppState & AppAction>()(
         } else {
           set((state) => {
             const editorState = state.editorState
-            if (
-              editorState.renders.length === 0 ||
-              editorState.lineGroups.length === 0
-            ) {
+            const { entries, headIndex } = editorState
+            if (headIndex === 0) {
               return
             }
-            const lastLineGroup = editorState.lineGroups.pop()!
-            editorState.redoLineGroups.push(lastLineGroup)
             editorState.redoCurLines = []
             editorState.curLineGroup = []
-
-            const lastRender = editorState.renders.pop()!
-            editorState.redoRenders.push(lastRender)
+            // Step over a whole patch-fill batch as a single undo unit.
+            let target = headIndex - 1
+            const last = entries[target]
+            if (last.kind === "patch" && last.batchId) {
+              const bId = last.batchId
+              while (target > 0) {
+                const prev = entries[target - 1]
+                if (prev.kind === "patch" && prev.batchId === bId) {
+                  target -= 1
+                } else {
+                  break
+                }
+              }
+            }
+            editorState.headIndex = target
           })
         }
       },
 
       redoDisabled: (): boolean => {
         const editorState = get().editorState
-        if (editorState.redoRenders.length > 0) {
+        if (get().runMannually() && editorState.redoCurLines.length !== 0) {
           return false
         }
-        if (get().runMannually()) {
-          if (editorState.redoCurLines.length === 0) {
-            return true
-          }
-        } else if (editorState.redoRenders.length === 0) {
-          return true
-        }
-        return false
+        return editorState.headIndex >= editorState.entries.length
       },
 
       redo: () => {
@@ -778,18 +1130,26 @@ export const useStore = createWithEqualityFn<AppState & AppAction>()(
         } else {
           set((state) => {
             const editorState = state.editorState
-            if (
-              editorState.redoRenders.length === 0 ||
-              editorState.redoLineGroups.length === 0
-            ) {
+            const { entries, headIndex } = editorState
+            if (headIndex >= entries.length) {
               return
             }
-            const lastLineGroup = editorState.redoLineGroups.pop()!
-            editorState.lineGroups.push(lastLineGroup)
             editorState.curLineGroup = []
-
-            const lastRender = editorState.redoRenders.pop()!
-            editorState.renders.push(lastRender)
+            // Redo a whole patch-fill batch as a single unit.
+            let target = headIndex + 1
+            const first = entries[headIndex]
+            if (first.kind === "patch" && first.batchId) {
+              const bId = first.batchId
+              while (target < entries.length) {
+                const nxt = entries[target]
+                if (nxt.kind === "patch" && nxt.batchId === bId) {
+                  target += 1
+                } else {
+                  break
+                }
+              }
+            }
+            editorState.headIndex = target
           })
         }
       },
@@ -797,8 +1157,6 @@ export const useStore = createWithEqualityFn<AppState & AppAction>()(
       resetRedoState: () => {
         set((state) => {
           state.editorState.redoCurLines = []
-          state.editorState.redoLineGroups = []
-          state.editorState.redoRenders = []
         })
       },
 
@@ -968,12 +1326,21 @@ export const useStore = createWithEqualityFn<AppState & AppAction>()(
             })
           }
         }
+        let originalImage: HTMLImageElement | null = null
+        try {
+          originalImage = await fileToImage(file)
+        } catch (e) {
+          console.error(e)
+        }
         set((state) => {
           state.file = file
           state.interactiveSegState = castDraft(
             defaultValues.interactiveSegState
           )
-          state.editorState = castDraft(defaultValues.editorState)
+          state.editorState = castDraft({
+            ...defaultValues.editorState,
+            originalImage,
+          })
           state.cropperState = defaultValues.cropperState
         })
       },
@@ -1243,6 +1610,26 @@ export const useStore = createWithEqualityFn<AppState & AppAction>()(
             ["fileManagerState", "settings"].includes(key)
           )
         ),
+      // Deep-merge persisted `settings`/`fileManagerState` over the defaults so
+      // newly added fields (e.g. patch-fill options) fall back to their default
+      // instead of becoming `undefined` for users with older localStorage.
+      merge: (persistedState, currentState) => {
+        const persisted = (persistedState ?? {}) as Partial<
+          AppState & AppAction
+        >
+        return {
+          ...currentState,
+          ...persisted,
+          settings: {
+            ...currentState.settings,
+            ...(persisted.settings ?? {}),
+          },
+          fileManagerState: {
+            ...currentState.fileManagerState,
+            ...(persisted.fileManagerState ?? {}),
+          },
+        }
+      },
     }
   ),
   shallow

@@ -30,7 +30,11 @@ License structure
     - requirements.txt      — relaxes pinned dependencies for newer Python
     - web_app/ (frontend)   — adds the Presets dropdown and cropper size
                               buttons, fixes the HD crop-strategy request fields,
-                              and removes the "Buy me a coffee" link
+                              removes the "Buy me a coffee" link, replaces the
+                              linear undo stack with a toggleable patch/layer
+                              history (History panel), and adds the "Patch fill"
+                              auto-tiling workflow (sliding-window inpainting of a
+                              whole masked area with a live tile preview)
 
 * The darktable integration added by this project is licensed under the GNU
   General Public License, version 3 or later (GPL-3.0-or-later), to match
