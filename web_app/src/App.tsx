@@ -18,11 +18,20 @@ const SUPPORTED_FILE_TYPE = [
   "image/tiff",
 ]
 function Home() {
-  const [file, updateAppState, setServerConfig, setFile] = useStore((state) => [
+  const [
+    file,
+    isRestoringSession,
+    updateAppState,
+    setServerConfig,
+    setFile,
+    restoreSession,
+  ] = useStore((state) => [
     state.file,
+    state.isRestoringSession,
     state.updateAppState,
     state.setServerConfig,
     state.setFile,
+    state.restoreSession,
   ])
 
   const userInputImage = useInputImage()
@@ -46,6 +55,15 @@ function Home() {
       if (serverConfig.isDesktop) {
         // Keeping GUI Window Open
         keepGUIAlive()
+      }
+      // Silently restore a persisted edit session (image + history) so a reload
+      // after a transient failure doesn't lose work. Must run *before* the
+      // preload below and be awaited: the preload always picks the first input
+      // image, which would otherwise clobber (and clear) a session for a
+      // different one.
+      const restored = await restoreSession()
+      if (restored) {
+        return
       }
       // When running with a file browser (e.g. the darktable integration), preload
       // the first input image so a single-image session opens ready to edit instead
@@ -165,7 +183,7 @@ function Home() {
       <Toaster />
       <Header />
       <Workspace />
-      {!file ? (
+      {!file && !isRestoringSession ? (
         <FileSelect
           onSelection={async (f) => {
             setFile(f)

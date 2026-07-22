@@ -35,6 +35,13 @@ https://github.com/user-attachments/assets/37acc48b-426d-48a3-9ce7-6a32db68d66d
    copies each result next to its original (with a configurable suffix), imports it into the
    darktable database, copies the original's **rating, color labels and tags**, and **groups
    the result with the original** (the original stays the group leader) so they stack together.
+4. In addition to that flat PNG, the script drops a **duplicate of the original that keeps its
+   full darktable edit history**, with the result composited back on top via the **overlay**
+   module. This is the useful one: you get a still-editable raw (all your modules intact) with
+   the retouch layered in, instead of only a baked PNG. The overlay is forced to run last, just
+   before the output colour profile, because the result was exported already tone-mapped and
+   must not be reprocessed. It's best-effort — if darktable's module order or the overlay
+   parameters can't be synthesised, the PNG import still succeeds and the reason is logged.
 
 You can also trigger **Import IOPaint results** manually at any time (fallback if the
 automatic tab-close detection misses).
@@ -164,6 +171,12 @@ removal, retouch for grain-matched cleanup.
 > **non-commercial use only**, and many diffusion checkpoints are community/OpenRAIL-licensed.
 > Check the license of any model you enable before relying on it.
 
+## The web UI
+
+Beyond stock IOPaint, the editor this fork ships adds presets, the workflow tabs, patch fill,
+a layer-style edit history, stop buttons and crash recovery. The rest of this section covers
+those.
+
 ### Presets
 
 The IOPaint UI has a **Presets** dropdown (bookmark icon, top-right). *Save current as preset…*
@@ -173,9 +186,73 @@ switches the running server's model if it differs). Presets are stored as JSON i
 get backed up with the rest of your darktable config. Note a preset is a per-session override:
 the next *send* still launches the server with the `model` preference above.
 
-When a **diffusion** model is active, the diffusion-options panel also gains a **Cropper** with
-**512 / 768 / 1024** quick-size buttons — the cropper restricts inpainting to a region processed
-at (near) native resolution, which improves diffusion quality and speed on large images.
+### Workflows (whole / cropper / extender / patch fill)
+
+The top of the right-hand panel is a **tab strip** picking how the image is fed to the model.
+The tabs are mutually exclusive and each one carries its own controls:
+
+- **Whole** — no pre-processing; the full image goes to the model.
+- **Cropper** — restrict inpainting to a region, processed at (near) native resolution, with
+  **512 / 768 / 1024** quick-size buttons. This is the big quality/speed win for diffusion
+  models on high-resolution photos, since it avoids the server downscaling the whole frame.
+  For oversized images on a diffusion model the cropper is turned on and sized automatically.
+- **Extender** — outpainting (only shown for models that support it); pick the axis and scale.
+- **Patch fill** — see below.
+
+### Patch fill (auto-tiling)
+
+Diffusion models only see ~512px (SDXL ~1024px) at a time, so a *large* masked area either has
+to be downscaled (mush) or done by hand tile by tile. **Patch fill** does it for you: it covers
+the masked region with a sliding window of **overlapping tiles**, runs them one at a time at
+native resolution, and feather-blends the seams. Each tile is fed the already-filled neighbours
+as context, so the fill stays coherent across the whole area.
+
+Three controls (with per-model-type defaults — 512/128/32 for SD-class models, 1024/256/64 for
+SDXL):
+
+| Control | Meaning |
+| --- | --- |
+| **Patch size** | Tile size sent to the model; keep at the model's native resolution. |
+| **Overlap** | How much neighbouring tiles overlap. Must be more than 2 × context, so the *inpainted* interiors overlap and can be blended. |
+| **Context** | Padding of already-known pixels around each tile, giving the model something to match. |
+
+A progress bar shows *tile n of N* while the batch runs. The whole run lands in the history as
+a **single collapsible batch** you can toggle or delete as one unit.
+
+### Edit history
+
+The **Edit history** button (top-left of the canvas) opens a panel listing every edit as a
+separate, **toggleable layer** — this replaces upstream's linear undo stack. Each inpaint is a
+patch over the region it covers, so you can switch individual results **on and off** to compare
+them, instead of undoing everything after them.
+
+Each card carries a thumbnail, an **enable/disable** switch, a chevron that expands the exact
+**settings the result was made with** (model, prompt, steps, guidance, strength, sampler, mask
+blur, seed), plus a row of actions:
+
+| Action | What it does |
+| --- | --- |
+| **Reuse mask** | Loads that patch's mask back into the editor (without running), so you can re-run it — e.g. on a different model — and compare. |
+| **Load settings** | Applies the saved settings, switching the server's model if needed. Doesn't run, so you can tweak first. |
+| **Retry** | Re-runs that patch **in place** with its own mask and settings, giving a fresh result (a new random seed, unless the patch pinned one). Only the patch's own pixels change; later edits are untouched. |
+| **Delete** | Permanently removes the edit from the history (asks first — unlike the toggle, this can't be undone). |
+
+Structural, size-changing steps (outpainting, upscaling) become locked entries: later patches
+are positioned relative to them, so they can't be toggled or deleted.
+
+### Stopping a run
+
+Diffusion inference can take a while on CPU. Both progress bars (single inference and patch
+fill) have a **stop** button that interrupts the run at the next diffusion step and, for patch
+fill, stops before starting the next tile. Erase models like `lama` do a single forward pass,
+so there's nothing to interrupt there.
+
+### Crash recovery
+
+The in-progress session — the source image plus the whole edit history — is saved to the
+browser's IndexedDB as you work. If the tab crashes or you reload, everything is restored
+automatically, so a transient failure doesn't cost you the work. Opening a *different* image
+starts a fresh session.
 
 ### Managing models from the UI
 
@@ -234,14 +311,24 @@ This fork adds a few small server features:
 - `GET /api/v1/server_log` — the tail of the server log, plus a new `--log-file PATH` option so
   the server knows which file (written by the launcher's redirection) to read back. Backs the
   *Server logs* viewer.
+- `POST /api/v1/cancel` — asks a running diffusion inference to stop at its next step (the
+  frontend also aborts the request). Backs the progress bars' *stop* buttons. Erase models run
+  a single forward pass, so this is a no-op for them.
 
 The `--input` / `--output-dir` options (which enable the file browser and Ctrl+S
 auto-saving) are standard IOPaint features and are set automatically by this script.
 
-A couple of small frontend fixes are also included: the HD **Crop** strategy parameters
+The frontend is substantially reworked on top of upstream's: the layer-style **edit history**
+(replacing the linear undo stack), the **workflow tabs**, **patch fill**, the **Models** and
+**Presets** dialogs, the **server log** viewer, the progress-bar **stop** buttons, and
+IndexedDB **session persistence** are all additions of this fork.
+
+A couple of small upstream fixes are also included: the HD **Crop** strategy parameters
 (crop trigger size / margin) were misspelled in the inpaint request and silently ignored —
 now corrected and the crop margin widened, which reduces seams/smearing from erase models on
-high-resolution images.
+high-resolution images. Model-type detection was also fixed for community diffusion checkpoints
+that misreport themselves in `model_index.json` (it now checks the UNet's input channels), which
+otherwise silently offered incompatible options that crashed at inference.
 
 The frontend build step is `scripts/build_frontend.sh` (`npm run build` in `web_app/`, copied
 into `iopaint/web_app/`). `setup.sh` runs it during setup; the darktable script also runs it on

@@ -11,6 +11,7 @@ import { CV2, LDM, MODEL_TYPE_INPAINT } from "@/lib/const"
 import LDMOptions from "./LDMOptions"
 import DiffusionOptions from "./DiffusionOptions"
 import CV2Options from "./CV2Options"
+import WorkflowTabs from "./WorkflowTabs"
 
 const SidePanel = () => {
   const [settings, windowSize] = useStore((state) => [
@@ -24,20 +25,17 @@ const SidePanel = () => {
     toggleOpen()
   })
 
-  if (
-    settings.model.name !== LDM &&
-    settings.model.name !== CV2 &&
-    settings.model.model_type === MODEL_TYPE_INPAINT
-  ) {
-    return null
-  }
-
+  // Model-specific options below the workflow tabs. Simple erase models
+  // (INPAINT) have no extra params, so they show only the workflow tabs.
   const renderSidePanelOptions = () => {
     if (settings.model.name === LDM) {
       return <LDMOptions />
     }
     if (settings.model.name === CV2) {
       return <CV2Options />
+    }
+    if (settings.model.model_type === MODEL_TYPE_INPAINT) {
+      return null
     }
     return <DiffusionOptions />
   }
@@ -86,6 +84,10 @@ const SidePanel = () => {
           <Separator />
         </SheetHeader>
         <ScrollArea style={{ height: windowSize.height - 160 }}>
+          <div className="mt-4">
+            <WorkflowTabs />
+          </div>
+          <Separator className="my-4" />
           {renderSidePanelOptions()}
         </ScrollArea>
       </SheetContent>

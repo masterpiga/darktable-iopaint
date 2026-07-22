@@ -27,6 +27,7 @@ import {
   DEFAULT_NEGATIVE_PROMPT,
   MAX_BRUSH_SIZE,
   MODEL_TYPE_INPAINT,
+  modelNativeSize,
   PAINT_BY_EXAMPLE,
 } from "./const"
 import {
@@ -47,13 +48,21 @@ import {
   maskIntersectsRect,
 } from "./utils"
 import inpaint, {
+  cancelInpaint,
   getGenInfo,
   getPresets,
   postAdjustMask,
   runPlugin,
   savePresets,
+  switchModel,
 } from "./api"
 import { toast } from "@/components/ui/use-toast"
+import {
+  clearSession,
+  deserializeEditor,
+  loadSession,
+  saveSession,
+} from "./session"
 
 type FileManagerState = {
   sortBy: SortBy
@@ -185,6 +194,9 @@ type AppState = {
   isInpainting: boolean
   isPluginRunning: boolean
   isAdjustingMask: boolean
+  // True until the one-shot session restore on app mount has resolved, so the
+  // landing FileSelect isn't flashed before a persisted session loads.
+  isRestoringSession: boolean
   // Progress of an in-flight patch-fill run, null when idle.
   patchProgress: { total: number; done: number } | null
   windowSize: Size
@@ -207,6 +219,11 @@ type AppState = {
 
 type AppAction = {
   updateAppState: (newState: Partial<AppState>) => void
+  // Restore a persisted edit session (image + history) from IndexedDB; called
+  // once on app mount. Clears isRestoringSession when done (or if none/failed).
+  // Resolves true if a session was actually restored, so the caller knows not to
+  // preload a different image over it.
+  restoreSession: () => Promise<boolean>
   setFile: (file: File) => Promise<void>
   setCustomFile: (file: File) => void
   setIsInpainting: (newValue: boolean) => void
@@ -245,6 +262,12 @@ type AppAction = {
   setServerConfig: (newValue: ServerConfig) => void
   setSeed: (newValue: number) => void
   updateSettings: (newSettings: Partial<Settings>) => void
+  applySettings: (
+    target: Settings,
+    cropper?: { width: number; height: number },
+    label?: string
+  ) => Promise<void>
+  maybeAutoEnableCropper: () => void
 
   // 互斥
   updateEnablePowerPaintV2: (newValue: boolean) => void
@@ -262,6 +285,7 @@ type AppAction = {
 
   runInpainting: () => Promise<void>
   runAutoTile: () => Promise<void>
+  stopProcessing: () => void
   showPrevMask: () => Promise<void>
   hidePrevMask: () => void
   runRenderablePlugin: (
@@ -277,6 +301,10 @@ type AppAction = {
   ensureOriginalImage: () => Promise<HTMLImageElement | null>
   togglePatch: (id: string) => void
   setBatchEnabled: (batchId: string, enabled: boolean) => void
+  deletePatch: (id: string) => void
+  deleteBatch: (batchId: string) => void
+  retryPatch: (id: string) => Promise<void>
+  reuseMask: (id: string) => Promise<void>
   updateEditorState: (newState: Partial<EditorState>) => void
   runMannually: () => boolean
   handleCanvasMouseDown: (point: Point) => void
@@ -301,6 +329,7 @@ const defaultValues: AppState = {
   isInpainting: false,
   isPluginRunning: false,
   isAdjustingMask: false,
+  isRestoringSession: true,
   patchProgress: null,
   disableShortCuts: false,
 
@@ -432,6 +461,17 @@ function genId(): string {
   return `e${Date.now().toString(36)}-${entrySeq}`
 }
 
+// Cancellation plumbing for the inpaint flows. Kept module-level (not in the
+// immer store) so the AbortController isn't deep-frozen. `currentAbort` aborts
+// the in-flight request; `stopRequested` tells the patch-fill loop not to start
+// further tiles.
+let currentAbort: AbortController | null = null
+let stopRequested = false
+
+function isAbort(e: unknown): boolean {
+  return e instanceof DOMException && e.name === "AbortError"
+}
+
 export const useStore = createWithEqualityFn<AppState & AppAction>()(
   persist(
     immer((set, get) => ({
@@ -533,6 +573,199 @@ export const useStore = createWithEqualityFn<AppState & AppAction>()(
         })
       },
 
+      // Permanently remove an edit (vs. the enable/disable toggle, which keeps
+      // it). Decrement headIndex for each removed entry that was in the active
+      // timeline so compositing and undo/redo stay consistent. Only patch
+      // entries are removable — rebase entries are structural (size-changing)
+      // and later patches depend on their coordinate space.
+      deletePatch: (id: string) => {
+        set((state) => {
+          const entries = state.editorState.entries
+          const idx = entries.findIndex((e) => e.id === id)
+          if (idx === -1 || entries[idx].kind !== "patch") {
+            return
+          }
+          if (idx < state.editorState.headIndex) {
+            state.editorState.headIndex -= 1
+          }
+          entries.splice(idx, 1)
+        })
+      },
+
+      deleteBatch: (batchId: string) => {
+        set((state) => {
+          const entries = state.editorState.entries
+          // Iterate from the end so each splice leaves earlier indices valid.
+          for (let i = entries.length - 1; i >= 0; i -= 1) {
+            const e = entries[i]
+            if (e.kind === "patch" && e.batchId === batchId) {
+              if (i < state.editorState.headIndex) {
+                state.editorState.headIndex -= 1
+              }
+              entries.splice(i, 1)
+            }
+          }
+        })
+      },
+
+      // Re-run a single patch in place using its own saved mask + settings,
+      // producing a fresh result (a new random seed unless the patch fixed its
+      // seed). The input is the composite of the entries *before* this patch —
+      // the base it was originally applied over — so only this patch's canvas
+      // changes; later entries are untouched. The server keeps a single model
+      // loaded, so switch to the patch's model first if it differs.
+      retryPatch: async (id: string) => {
+        const { file, paintByExampleFile, extenderState } = get()
+        if (file === null || get().isInpainting) {
+          return
+        }
+        const entry = get().editorState.entries.find((e) => e.id === id)
+        if (!entry || entry.kind !== "patch") {
+          return
+        }
+        const settings = entry.settings
+
+        if (settings.model.name !== get().settings.model.name) {
+          if (get().serverConfig.disableModelSwitch) {
+            toast({
+              variant: "destructive",
+              description: `Retry needs model "${settings.model.name}", but model switching is disabled on this server.`,
+            })
+            return
+          }
+          try {
+            get().updateAppState({ disableShortCuts: true })
+            const newModel = await switchModel(settings.model.name)
+            get().setModel(newModel)
+          } catch (e: any) {
+            toast({
+              variant: "destructive",
+              description: `Failed to switch to "${settings.model.name}": ${
+                e.message ? e.message : e.toString()
+              }`,
+            })
+            return
+          } finally {
+            get().updateAppState({ disableShortCuts: false })
+          }
+        }
+
+        const originalImage = await get().ensureOriginalImage()
+        // Re-find after the awaits in case the history changed meanwhile.
+        const entries = get().editorState.entries
+        const idx = entries.findIndex((e) => e.id === id)
+        if (idx === -1) {
+          return
+        }
+
+        let targetFile = file
+        let baseW = get().imageWidth
+        let baseH = get().imageHeight
+        if (originalImage) {
+          const composed = composeEntries(
+            originalImage,
+            originalImage.naturalWidth,
+            originalImage.naturalHeight,
+            entries,
+            idx
+          )
+          baseW = composed.width
+          baseH = composed.height
+          if (idx > 0) {
+            targetFile = await canvasToFile(composed.canvas, file.name, file.type)
+          }
+        }
+
+        const maskCanvas = generateMask(
+          baseW,
+          baseH,
+          [entry.lineGroup],
+          entry.extraMasks,
+          BRUSH_COLOR
+        )
+
+        const ac = new AbortController()
+        currentAbort = ac
+        stopRequested = false
+        set((state) => {
+          state.isInpainting = true
+        })
+
+        try {
+          const res = await inpaint(
+            targetFile,
+            settings,
+            entry.bbox,
+            extenderState,
+            dataURItoBlob(maskCanvas.toDataURL()),
+            paintByExampleFile,
+            false,
+            ac.signal
+          )
+          const { blob, seed } = res
+          if (seed) {
+            get().setSeed(parseInt(seed, 10))
+          }
+          const newRender = new Image()
+          await loadImage(newRender, blob)
+          get().setImageSize(newRender.width, newRender.height)
+
+          const bbox =
+            (settings.showCropper
+              ? clampRect(entry.bbox, newRender.width, newRender.height)
+              : bboxFromMaskCanvas(maskCanvas, settings.sdMaskBlur)) ??
+            entry.bbox
+
+          set((state) => {
+            const i = state.editorState.entries.findIndex((e) => e.id === id)
+            const prev = state.editorState.entries[i]
+            if (i === -1 || !prev || prev.kind !== "patch") {
+              return
+            }
+            prev.bbox = bbox
+            prev.canvas = castDraft(cropToCanvas(newRender, bbox))
+            if (seed) {
+              prev.settings.seed = parseInt(seed, 10)
+            }
+          })
+        } catch (e: any) {
+          if (!isAbort(e)) {
+            toast({
+              variant: "destructive",
+              description: e.message ? e.message : e.toString(),
+            })
+          }
+        }
+
+        currentAbort = null
+        set((state) => {
+          state.isInpainting = false
+          state.editorState.temporaryMasks = []
+        })
+      },
+
+      // Reload a past patch's mask into the editor (without running) so it can be
+      // re-applied — e.g. with a different model — to compare results via the
+      // per-patch history toggles. Tiles of a patch-fill batch all carry the same
+      // full mask, so reusing any of them reuses the whole operation's mask.
+      reuseMask: async (id: string) => {
+        const entry = get().editorState.entries.find((e) => e.id === id)
+        if (!entry || entry.kind !== "patch") {
+          return
+        }
+        // Deep-copy the stroke geometry so later edits don't mutate the stored
+        // history entry; extra masks are immutable images, so share the refs.
+        const lineGroup = entry.lineGroup.map((line) => ({
+          size: line.size,
+          pts: line.pts.map((p) => ({ ...p })),
+        }))
+        set((state) => {
+          state.editorState.curLineGroup = castDraft(lineGroup)
+          state.editorState.extraMasks = castDraft([...entry.extraMasks])
+        })
+        toast({ description: "Mask loaded — run to apply" })
+      },
+
       getCurrentTargetFile: async (): Promise<File> => {
         const file = get().file! // 一定是在 file 加载了以后才可能调用这个函数
         if (get().editorState.headIndex === 0) {
@@ -630,6 +863,9 @@ export const useStore = createWithEqualityFn<AppState & AppAction>()(
         // input is the composite excluding that patch.
         const inputCount = isReroll ? headIndex - 1 : headIndex
 
+        const ac = new AbortController()
+        currentAbort = ac
+        stopRequested = false
         set((state) => {
           state.isInpainting = true
         })
@@ -667,7 +903,9 @@ export const useStore = createWithEqualityFn<AppState & AppAction>()(
             cropperState,
             extenderState,
             dataURItoBlob(maskCanvas.toDataURL()),
-            paintByExampleFile
+            paintByExampleFile,
+            false,
+            ac.signal
           )
 
           const { blob, seed } = res
@@ -723,6 +961,8 @@ export const useStore = createWithEqualityFn<AppState & AppAction>()(
               lineGroup: maskLineGroup,
               extraMasks: maskImages,
               label: "Inpaint",
+              settings: JSON.parse(JSON.stringify(settings)) as Settings,
+              cropper: { width: cropperState.width, height: cropperState.height },
             }
             set((state) => {
               if (isReroll) {
@@ -748,12 +988,16 @@ export const useStore = createWithEqualityFn<AppState & AppAction>()(
             prevExtraMasks: maskImages,
           })
         } catch (e: any) {
-          toast({
-            variant: "destructive",
-            description: e.message ? e.message : e.toString(),
-          })
+          // A user-requested stop aborts the request; that's not an error.
+          if (!isAbort(e)) {
+            toast({
+              variant: "destructive",
+              description: e.message ? e.message : e.toString(),
+            })
+          }
         }
 
+        currentAbort = null
         get().resetRedoState()
         set((state) => {
           state.isInpainting = false
@@ -768,10 +1012,20 @@ export const useStore = createWithEqualityFn<AppState & AppAction>()(
           imageWidth,
           imageHeight,
           settings,
+          cropperState,
           extenderState,
         } = get()
         if (file === null) {
           return
+        }
+        // One snapshot for the whole batch: every tile records the same settings,
+        // so the history panel can inspect/reapply the operation.
+        const settingsSnapshot = JSON.parse(
+          JSON.stringify(settings)
+        ) as Settings
+        const cropperSnapshot = {
+          width: cropperState.width,
+          height: cropperState.height,
         }
         const { curLineGroup, extraMasks } = get().editorState
         const originalImage = await get().ensureOriginalImage()
@@ -833,6 +1087,7 @@ export const useStore = createWithEqualityFn<AppState & AppAction>()(
         const batchId = genId()
         const total = tiles.length
 
+        stopRequested = false
         // Drop any redoable tail before appending the batch.
         set((state) => {
           state.isInpainting = true
@@ -844,6 +1099,10 @@ export const useStore = createWithEqualityFn<AppState & AppAction>()(
 
         try {
           for (let i = 0; i < tiles.length; i += 1) {
+            // Stop requested between tiles: keep the finished ones, run no more.
+            if (stopRequested) {
+              break
+            }
             const tile = tiles[i]
 
             // Compose the current timeline (includes earlier tiles) as input,
@@ -863,6 +1122,8 @@ export const useStore = createWithEqualityFn<AppState & AppAction>()(
             }
 
             const tileMask = clipMaskToRect(maskCanvas, innerMaskRect(tile))
+            const ac = new AbortController()
+            currentAbort = ac
             const res = await inpaint(
               targetFile,
               settings,
@@ -870,7 +1131,8 @@ export const useStore = createWithEqualityFn<AppState & AppAction>()(
               extenderState,
               dataURItoBlob(tileMask.toDataURL()),
               paintByExampleFile,
-              true
+              true,
+              ac.signal
             )
             const { blob, seed } = res
             if (seed) {
@@ -898,6 +1160,8 @@ export const useStore = createWithEqualityFn<AppState & AppAction>()(
               extraMasks,
               batchId,
               label: `Patch ${i + 1}/${total}`,
+              settings: settingsSnapshot,
+              cropper: cropperSnapshot,
             }
             set((state) => {
               state.editorState.entries.push(castDraft(patch))
@@ -915,17 +1179,29 @@ export const useStore = createWithEqualityFn<AppState & AppAction>()(
             prevExtraMasks: extraMasks,
           })
         } catch (e: any) {
-          toast({
-            variant: "destructive",
-            description: e.message ? e.message : e.toString(),
-          })
+          // Aborting the current tile (user stop) ends the batch without error.
+          if (!isAbort(e)) {
+            toast({
+              variant: "destructive",
+              description: e.message ? e.message : e.toString(),
+            })
+          }
         }
 
+        currentAbort = null
         get().resetRedoState()
         set((state) => {
           state.isInpainting = false
           state.patchProgress = null
         })
+      },
+
+      // Stop the current inpaint/patch-fill run: abort the in-flight request,
+      // ask the server to interrupt diffusion, and prevent further patch tiles.
+      stopProcessing: () => {
+        stopRequested = true
+        cancelInpaint()
+        currentAbort?.abort()
       },
 
       runRenderablePlugin: async (
@@ -1197,6 +1473,88 @@ export const useStore = createWithEqualityFn<AppState & AppAction>()(
         })
       },
 
+      // Apply a full settings snapshot (model included), switching the server
+      // model when needed. Shared by the Presets dropdown and the history panel's
+      // "Load settings". `cropper` restores the cropper size (which lives outside
+      // `settings`); `label` is only used to phrase the toasts.
+      applySettings: async (
+        target: Settings,
+        cropper?: { width: number; height: number },
+        label?: string
+      ) => {
+        const { settings, serverConfig } = get()
+        const needSwitch = target.model.name !== settings.model.name
+        const what = label ? `"${label}"` : "settings"
+
+        const applyCropper = () => {
+          if (target.showCropper && cropper) {
+            get().setCropperDimensions(cropper.width, cropper.height)
+          }
+        }
+
+        if (needSwitch && serverConfig.disableModelSwitch) {
+          toast({
+            variant: "destructive",
+            title: `${what} needs model "${target.model.name}", but model switching is disabled on this server. Applied the other settings only.`,
+          })
+          get().updateSettings({ ...target, model: settings.model })
+          applyCropper()
+          return
+        }
+
+        try {
+          if (needSwitch) {
+            get().updateAppState({ disableShortCuts: true })
+            const newModel = await switchModel(target.model.name)
+            get().updateSettings(target)
+            get().setModel(newModel)
+            applyCropper()
+            toast({ title: `Loaded ${what} (switched to ${newModel.name})` })
+          } else {
+            // keep the live model object, just apply the rest of the settings
+            get().updateSettings({ ...target, model: settings.model })
+            applyCropper()
+            toast({ title: `Loaded ${what}` })
+          }
+        } catch (error: any) {
+          toast({
+            variant: "destructive",
+            title: `Failed to load ${what}: ${error}`,
+          })
+        } finally {
+          get().updateAppState({ disableShortCuts: false })
+        }
+      },
+
+      // For diffusion models, if the image is bigger than the model's native
+      // input resolution and neither patch-fill nor the extender is active, turn
+      // the cropper on and size it to the native resolution, centred. This keeps
+      // the masked region at full quality instead of letting the server downscale
+      // the whole image. Erase models (LaMa etc.) handle large images via the HD
+      // crop strategy, so they're left alone. Only ever enables the cropper.
+      maybeAutoEnableCropper: () => {
+        const { settings, imageWidth, imageHeight } = get()
+        if (!get().isSD() || settings.patchFill || settings.showExtender) {
+          return
+        }
+        if (imageWidth === 0 || imageHeight === 0) {
+          return
+        }
+        const native = modelNativeSize(settings.model.model_type)
+        if (Math.max(imageWidth, imageHeight) <= native) {
+          return
+        }
+        const w = Math.min(native, imageWidth)
+        const h = Math.min(native, imageHeight)
+        set((state) => {
+          state.settings.showCropper = true
+          state.cropperState.width = w
+          state.cropperState.height = h
+          state.cropperState.x = Math.round((imageWidth - w) / 2)
+          state.cropperState.y = Math.round((imageHeight - h) / 2)
+        })
+      },
+
       updateEnablePowerPaintV2: (newValue: boolean) => {
         get().updateSettings({ enablePowerPaintV2: newValue })
         if (newValue) {
@@ -1305,6 +1663,41 @@ export const useStore = createWithEqualityFn<AppState & AppAction>()(
           state.isInpainting = newValue
         }),
 
+      restoreSession: async () => {
+        try {
+          // A file already loaded (e.g. from a URL param) is explicit intent and
+          // wins over a persisted session.
+          if (get().file) {
+            return false
+          }
+          const record = await loadSession()
+          if (!record || record.entries.length === 0) {
+            return false
+          }
+          const { file, entries, headIndex } = await deserializeEditor(record)
+          const originalImage = await fileToImage(file)
+          set((state) => {
+            state.file = file
+            state.editorState = castDraft({
+              ...defaultValues.editorState,
+              originalImage,
+              entries,
+              headIndex,
+            })
+          })
+          return true
+        } catch (e) {
+          // A corrupt/incompatible record must never block startup.
+          console.error("restoreSession failed", e)
+          clearSession()
+          return false
+        } finally {
+          set((state) => {
+            state.isRestoringSession = false
+          })
+        }
+      },
+
       setFile: async (file: File) => {
         if (get().settings.enableAutoExtractPrompt) {
           try {
@@ -1332,6 +1725,30 @@ export const useStore = createWithEqualityFn<AppState & AppAction>()(
         } catch (e) {
           console.error(e)
         }
+        // Re-opening the same image (by name + size) restores its in-progress
+        // edits; a different image starts fresh and discards the old session.
+        // setFile is the app's normal load path (FileManager / upload / URL
+        // param), so it must not unconditionally wipe the session.
+        let entries: HistoryEntry[] = []
+        let headIndex = 0
+        try {
+          const record = await loadSession()
+          if (
+            record &&
+            record.entries.length > 0 &&
+            record.fileName === file.name &&
+            record.fileSize === file.size
+          ) {
+            const restored = await deserializeEditor(record)
+            entries = restored.entries
+            headIndex = restored.headIndex
+          } else {
+            clearSession()
+          }
+        } catch (e) {
+          console.error("session restore in setFile failed", e)
+          clearSession()
+        }
         set((state) => {
           state.file = file
           state.interactiveSegState = castDraft(
@@ -1340,6 +1757,8 @@ export const useStore = createWithEqualityFn<AppState & AppAction>()(
           state.editorState = castDraft({
             ...defaultValues.editorState,
             originalImage,
+            entries,
+            headIndex,
           })
           state.cropperState = defaultValues.cropperState
         })
@@ -1634,3 +2053,50 @@ export const useStore = createWithEqualityFn<AppState & AppAction>()(
   ),
   shallow
 )
+
+// Debounced autosave of the in-progress session (source file + committed
+// history) to IndexedDB, so a reload after a transient failure can restore it.
+// Watches only the fields that define the session; immer hands out new
+// `entries`/`editorState` references on every edit (including patch toggles),
+// so reference comparison is enough to detect changes.
+let sessionSaveTimer: ReturnType<typeof setTimeout> | null = null
+let lastSavedEntries: HistoryEntry[] | null = null
+let lastSavedHeadIndex = -1
+let lastSavedFile: File | null = null
+
+useStore.subscribe((state) => {
+  const { file } = state
+  const { entries, headIndex } = state.editorState
+  if (
+    entries === lastSavedEntries &&
+    headIndex === lastSavedHeadIndex &&
+    file === lastSavedFile
+  ) {
+    return
+  }
+  lastSavedEntries = entries
+  lastSavedHeadIndex = headIndex
+  lastSavedFile = file
+
+  if (sessionSaveTimer) {
+    clearTimeout(sessionSaveTimer)
+  }
+  sessionSaveTimer = setTimeout(() => {
+    sessionSaveTimer = null
+    const s = useStore.getState()
+    const f = s.file
+    const { entries: e, headIndex: h } = s.editorState
+    // No file means we're in the pre-restore mount window (or nothing is
+    // loaded) — never clear storage here, or we'd delete the record that the
+    // mount-time restore is about to read.
+    if (!f) {
+      return
+    }
+    if (h === 0 || e.length === 0) {
+      // A file is loaded with no committed edits — nothing worth keeping.
+      clearSession()
+      return
+    }
+    saveSession(f, e, h)
+  }, 600)
+})

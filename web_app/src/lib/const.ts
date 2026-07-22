@@ -73,3 +73,11 @@ export const DEFAULT_PATCH_DEFAULTS: PatchDefaults = {
   patchOverlap: 128,
   patchContextPad: 32,
 }
+
+// A diffusion model's native input resolution (512 for SD, 1024 for SDXL).
+// Reuses the patch-fill native window size, which already encodes the same
+// per-model-type value. Used to auto-size the cropper for oversized images.
+export function modelNativeSize(modelType: string): number {
+  return (PATCH_DEFAULTS_BY_MODEL_TYPE[modelType] ?? DEFAULT_PATCH_DEFAULTS)
+    .patchSize
+}

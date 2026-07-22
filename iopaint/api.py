@@ -167,10 +167,20 @@ def api_middleware(app: FastAPI):
 
 global_sio: AsyncServer = None
 
+# Set by the /api/v1/cancel endpoint to ask the running diffusion pipeline to
+# stop at the next step. Cleared at the start of each inpaint. Only affects
+# diffusion models (which step through a callback); erase models run a single
+# forward pass, so the frontend just stops waiting for those.
+cancel_requested = threading.Event()
+
 
 def diffuser_callback(pipe, step: int, timestep: int, callback_kwargs: Dict = {}):
     # self: DiffusionPipeline, step: int, timestep: int, callback_kwargs: Dict
     # logger.info(f"diffusion callback: step={step}, timestep={timestep}")
+
+    # Stop the denoising loop early when the user requested a cancel.
+    if cancel_requested.is_set():
+        pipe._interrupt = True
 
     # We use asyncio loos for task processing. Perhaps in the future, we can add a processing queue similar to InvokeAI,
     # but for now let's just start a separate event loop. It shouldn't make a difference for single person use
@@ -212,6 +222,7 @@ class Api:
         self.add_api_route("/api/v1/model", self.api_switch_model, methods=["POST"], response_model=ModelInfo)
         self.add_api_route("/api/v1/inputimage", self.api_input_image, methods=["GET"])
         self.add_api_route("/api/v1/inpaint", self.api_inpaint, methods=["POST"])
+        self.add_api_route("/api/v1/cancel", self.api_cancel, methods=["POST"])
         self.add_api_route("/api/v1/switch_plugin_model", self.api_switch_plugin_model, methods=["POST"])
         self.add_api_route("/api/v1/run_plugin_gen_mask", self.api_run_plugin_gen_mask, methods=["POST"])
         self.add_api_route("/api/v1/run_plugin_gen_image", self.api_run_plugin_gen_image, methods=["POST"])
@@ -466,7 +477,14 @@ class Api:
             negative_prompt = parts[1].split("\n")[0].strip()
         return GenInfoResponse(prompt=prompt, negative_prompt=negative_prompt)
 
+    def api_cancel(self):
+        # Ask the in-flight diffusion run to stop at its next step. No-op if
+        # nothing is running or for erase models (cleared on the next inpaint).
+        cancel_requested.set()
+        return Response(status_code=200)
+
     def api_inpaint(self, req: InpaintRequest):
+        cancel_requested.clear()
         image, alpha_channel, infos, ext = decode_base64_to_image(req.image)
         mask, _, _, _ = decode_base64_to_image(req.mask, gray=True)
         logger.info(f"image ext: {ext}")

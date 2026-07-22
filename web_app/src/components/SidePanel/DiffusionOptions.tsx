@@ -11,7 +11,7 @@ import {
   SelectValue,
 } from "../ui/select"
 import { Textarea } from "../ui/textarea"
-import { ExtenderDirection, PowerPaintTask } from "@/lib/types"
+import { PowerPaintTask } from "@/lib/types"
 import { Separator } from "../ui/separator"
 import { Button, ImageUploadButton } from "../ui/button"
 import { Slider } from "../ui/slider"
@@ -26,26 +26,6 @@ import { RowContainer, LabelTitle } from "./LabelTitle"
 import { Upload } from "lucide-react"
 import { useClickAway } from "react-use"
 
-const ExtenderButton = ({
-  text,
-  onClick,
-}: {
-  text: string
-  onClick: () => void
-}) => {
-  const [showExtender] = useStore((state) => [state.settings.showExtender])
-  return (
-    <Button
-      variant="outline"
-      className="p-1 h-8"
-      disabled={!showExtender}
-      onClick={onClick}
-    >
-      <div className="flex items-center gap-1">{text}</div>
-    </Button>
-  )
-}
-
 const DiffusionOptions = () => {
   const [
     samplers,
@@ -55,15 +35,12 @@ const DiffusionOptions = () => {
     updateSettings,
     runInpainting,
     updateAppState,
-    updateExtenderByBuiltIn,
-    updateExtenderDirection,
     adjustMask,
     clearMask,
     updateEnablePowerPaintV2,
     updateEnableBrushNet,
     updateEnableControlnet,
     updateLCMLora,
-    setCropperSize,
   ] = useStore((state) => [
     state.serverConfig.samplers,
     state.settings,
@@ -72,15 +49,12 @@ const DiffusionOptions = () => {
     state.updateSettings,
     state.runInpainting,
     state.updateAppState,
-    state.updateExtenderByBuiltIn,
-    state.updateExtenderDirection,
     state.adjustMask,
     state.clearMask,
     state.updateEnablePowerPaintV2,
     state.updateEnableBrushNet,
     state.updateEnableControlnet,
     state.updateLCMLora,
-    state.setCropperSize,
   ])
   const [exampleImage, isExampleImageLoaded] = useImage(paintByExampleFile)
   const negativePromptRef = useRef(null)
@@ -96,59 +70,6 @@ const DiffusionOptions = () => {
     if (e.key === "Enter" && e.ctrlKey && settings.prompt.length !== 0) {
       runInpainting()
     }
-  }
-
-  const renderCropper = () => {
-    return (
-      <div className="flex flex-col gap-2">
-        <RowContainer>
-          <LabelTitle
-            text="Cropper"
-            toolTip="Inpainting on part of image, improve inference speed and reduce memory usage."
-          />
-          <Switch
-            id="cropper"
-            checked={settings.showCropper}
-            onCheckedChange={(value) => {
-              updateSettings({ showCropper: value })
-              if (value) {
-                updateSettings({ showExtender: false })
-              }
-            }}
-          />
-        </RowContainer>
-
-        <RowContainer>
-          <div />
-          <div className="flex gap-1 justify-center mt-0">
-            <Button
-              variant="outline"
-              className="p-1 h-8"
-              disabled={!settings.showCropper}
-              onClick={() => setCropperSize(512)}
-            >
-              <div className="flex items-center gap-1">512</div>
-            </Button>
-            <Button
-              variant="outline"
-              className="p-1 h-8"
-              disabled={!settings.showCropper}
-              onClick={() => setCropperSize(768)}
-            >
-              <div className="flex items-center gap-1">768</div>
-            </Button>
-            <Button
-              variant="outline"
-              className="p-1 h-8"
-              disabled={!settings.showCropper}
-              onClick={() => setCropperSize(1024)}
-            >
-              <div className="flex items-center gap-1">1024</div>
-            </Button>
-          </div>
-        </RowContainer>
-      </div>
-    )
   }
 
   const renderBrushNetSetting = () => {
@@ -503,88 +424,6 @@ const DiffusionOptions = () => {
     )
   }
 
-  const renderExtender = () => {
-    if (!settings.model.support_outpainting) {
-      return null
-    }
-    return (
-      <>
-        <div className="flex flex-col gap-2">
-          <RowContainer>
-            <LabelTitle
-              text="Extender"
-              toolTip="Perform outpainting on images to expand it's content."
-            />
-            <Switch
-              id="extender"
-              checked={settings.showExtender}
-              onCheckedChange={(value) => {
-                updateSettings({ showExtender: value })
-                if (value) {
-                  updateSettings({ showCropper: false })
-                }
-              }}
-            />
-          </RowContainer>
-
-          <RowContainer>
-            <Select
-              defaultValue={settings.extenderDirection}
-              value={settings.extenderDirection}
-              onValueChange={(value) => {
-                updateExtenderDirection(value as ExtenderDirection)
-              }}
-            >
-              <SelectTrigger
-                className="w-[65px] h-7"
-                disabled={!settings.showExtender}
-              >
-                <SelectValue placeholder="Select axis" />
-              </SelectTrigger>
-              <SelectContent align="end">
-                <SelectGroup>
-                  {Object.values(ExtenderDirection).map((v) => (
-                    <SelectItem key={v} value={v}>
-                      {v}
-                    </SelectItem>
-                  ))}
-                </SelectGroup>
-              </SelectContent>
-            </Select>
-
-            <div className="flex gap-1 justify-center mt-0">
-              <ExtenderButton
-                text="1.25x"
-                onClick={() =>
-                  updateExtenderByBuiltIn(settings.extenderDirection, 1.25)
-                }
-              />
-              <ExtenderButton
-                text="1.5x"
-                onClick={() =>
-                  updateExtenderByBuiltIn(settings.extenderDirection, 1.5)
-                }
-              />
-              <ExtenderButton
-                text="1.75x"
-                onClick={() =>
-                  updateExtenderByBuiltIn(settings.extenderDirection, 1.75)
-                }
-              />
-              <ExtenderButton
-                text="2.0x"
-                onClick={() =>
-                  updateExtenderByBuiltIn(settings.extenderDirection, 2.0)
-                }
-              />
-            </div>
-          </RowContainer>
-        </div>
-        <Separator />
-      </>
-    )
-  }
-
   const renderPowerPaintTaskType = () => {
     return (
       <RowContainer>
@@ -931,9 +770,7 @@ const DiffusionOptions = () => {
   }
 
   return (
-    <div className="flex flex-col gap-[14px] mt-4">
-      {renderCropper()}
-      {renderExtender()}
+    <div className="flex flex-col gap-[14px]">
       {renderMaskBlur()}
       {renderMaskAdjuster()}
       {renderMatchHistograms()}

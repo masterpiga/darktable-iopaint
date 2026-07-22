@@ -34,7 +34,9 @@ export default async function inpaint(
   paintByExampleImage: File | null = null,
   // Patch-fill drives the cropper per tile, independent of settings.showCropper,
   // so diffusion models process each tile at native resolution.
-  forceCroper = false
+  forceCroper = false,
+  // Aborts the request when the user stops processing.
+  signal?: AbortSignal
 ) {
   const imageBase64 = await convertToBase64(imageFile)
   const maskBase64 = await convertToBase64(mask)
@@ -44,6 +46,7 @@ export default async function inpaint(
 
   const res = await fetch(`${API_ENDPOINT}/inpaint`, {
     method: "POST",
+    signal,
     headers: {
       "Content-Type": "application/json",
     },
@@ -103,6 +106,17 @@ export default async function inpaint(
     }
   }
   throw await throwErrors(res)
+}
+
+// Ask the server to interrupt the running diffusion inference. Best-effort:
+// erase models can't be interrupted mid-pass, so the frontend abort is what
+// actually stops the wait there.
+export async function cancelInpaint(): Promise<void> {
+  try {
+    await api.post(`/cancel`)
+  } catch {
+    // The request was likely aborted alongside the inpaint; ignore.
+  }
 }
 
 export async function getServerConfig(): Promise<ServerConfig> {

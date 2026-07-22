@@ -2,9 +2,8 @@ import { useEffect } from "react"
 import Editor from "./Editor"
 import { currentModel } from "@/lib/api"
 import { useStore } from "@/lib/states"
-import ImageSize from "./ImageSize"
 import Plugins from "./Plugins"
-import PatchFill from "./PatchFill"
+import HistoryPanel from "./HistoryPanel"
 import { InteractiveSeg } from "./InteractiveSeg"
 import SidePanel from "./SidePanel"
 import DiffusionProgress from "./DiffusionProgress"
@@ -27,8 +26,7 @@ const Workspace = () => {
     <>
       <div className="flex gap-3 absolute top-[68px] left-[24px] items-center z-20">
         <Plugins />
-        <ImageSize />
-        {file ? <PatchFill /> : <></>}
+        {file ? <HistoryPanel /> : <></>}
       </div>
       <InteractiveSeg />
       <DiffusionProgress />

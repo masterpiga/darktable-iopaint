@@ -14,8 +14,10 @@ License structure
   such modifications are noted here and recorded in the project's git history.
   The modified upstream files are:
     - iopaint/api.py        — adds the `/api/v1/connected_clients`, `/api/v1/presets`
-                              (GET/POST), `/api/v1/server_log`, `/api/v1/models` and
-                              `/api/v1/download_model` endpoints
+                              (GET/POST), `/api/v1/server_log`, `/api/v1/models`,
+                              `/api/v1/download_model` and `/api/v1/cancel`
+                              endpoints (the last interrupts a running diffusion
+                              inference)
     - iopaint/cli.py        — adds the `--preset-file` and `--log-file` options to
                               `iopaint start`
     - iopaint/schema.py     — adds `preset_file` and `log_file` to `ApiConfig`
@@ -28,13 +30,23 @@ License structure
                               switch_brushnet_method so disabling ControlNet or
                               BrushNet takes effect (was skipped when toggled off)
     - requirements.txt      — relaxes pinned dependencies for newer Python
-    - web_app/ (frontend)   — adds the Presets dropdown and cropper size
-                              buttons, fixes the HD crop-strategy request fields,
-                              removes the "Buy me a coffee" link, replaces the
-                              linear undo stack with a toggleable patch/layer
-                              history (History panel), and adds the "Patch fill"
-                              auto-tiling workflow (sliding-window inpainting of a
-                              whole masked area with a live tile preview)
+    - web_app/ (frontend)   — adds the Presets dropdown, fixes the HD
+                              crop-strategy request fields, removes the "Buy me a
+                              coffee" link, replaces the linear undo stack with a
+                              toggleable patch/layer history opened from a floating
+                              "Edit history" button (History panel), consolidates
+                              the mutually-exclusive cropper / extender / patch-fill
+                              workflows into a tab strip in the right panel, adds
+                              the "Patch fill" auto-tiling workflow (sliding-window
+                              inpainting of a whole masked area with a live tile
+                              preview), auto-enables and sizes the cropper for
+                              oversized diffusion images, and lets the History panel
+                              inspect a patch's settings, reuse its mask, and reapply
+                              its settings, adds stop buttons to the progress
+                              bars (per-inference and patch-fill) that cancel
+                              processing, and persists the in-progress edit
+                              session (source image + history) to IndexedDB so a
+                              reload after a transient failure restores the work
 
 * The darktable integration added by this project is licensed under the GNU
   General Public License, version 3 or later (GPL-3.0-or-later), to match

@@ -2,7 +2,6 @@ import { useEffect, useMemo, useState } from "react"
 import { Bookmark, BookmarkCheck, Check, Save, Trash2 } from "lucide-react"
 
 import { useStore, Settings } from "@/lib/states"
-import { switchModel } from "@/lib/api"
 import { cn } from "@/lib/utils"
 import { Button, IconButton } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
@@ -28,11 +27,7 @@ const PresetSelect = () => {
     presets,
     settings,
     cropperState,
-    serverConfig,
-    updateSettings,
-    setModel,
-    setCropperDimensions,
-    updateAppState,
+    applySettings,
     loadPresets,
     savePreset,
     deletePreset,
@@ -40,11 +35,7 @@ const PresetSelect = () => {
     state.presets,
     state.settings,
     state.cropperState,
-    state.serverConfig,
-    state.updateSettings,
-    state.setModel,
-    state.setCropperDimensions,
-    state.updateAppState,
+    state.applySettings,
     state.loadPresets,
     state.savePreset,
     state.deletePreset,
@@ -96,50 +87,7 @@ const PresetSelect = () => {
     if (!preset) {
       return
     }
-    const target = preset.settings
-    const needSwitch = target.model.name !== settings.model.name
-
-    // Cropper size lives outside `settings`; restore it when the cropper is on.
-    const applyCropper = () => {
-      if (target.showCropper && preset.cropper) {
-        setCropperDimensions(preset.cropper.width, preset.cropper.height)
-      }
-    }
-
-    if (needSwitch && serverConfig.disableModelSwitch) {
-      toast({
-        variant: "destructive",
-        title: `Preset "${preset.name}" needs model "${target.model.name}", but model switching is disabled on this server. Applied the other settings only.`,
-      })
-      updateSettings({ ...target, model: settings.model })
-      applyCropper()
-      return
-    }
-
-    try {
-      if (needSwitch) {
-        updateAppState({ disableShortCuts: true })
-        const newModel = await switchModel(target.model.name)
-        updateSettings(target)
-        setModel(newModel)
-        applyCropper()
-        toast({
-          title: `Loaded preset "${preset.name}" (switched to ${newModel.name})`,
-        })
-      } else {
-        // keep the live model object, just apply the rest of the settings
-        updateSettings({ ...target, model: settings.model })
-        applyCropper()
-        toast({ title: `Loaded preset "${preset.name}"` })
-      }
-    } catch (error: any) {
-      toast({
-        variant: "destructive",
-        title: `Failed to load preset "${preset.name}": ${error}`,
-      })
-    } finally {
-      updateAppState({ disableShortCuts: false })
-    }
+    await applySettings(preset.settings, preset.cropper, preset.name)
   }
 
   const handleSave = async () => {

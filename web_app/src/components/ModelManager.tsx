@@ -33,14 +33,14 @@ const formatSize = (bytes: number, estimate: boolean) => {
 
 const ModelManager = () => {
   const { toast } = useToast()
-  const [settings, serverConfig, setModel, updateAppState] = useStore(
-    (state) => [
+  const [settings, serverConfig, setModel, maybeAutoEnableCropper, updateAppState] =
+    useStore((state) => [
       state.settings,
       state.serverConfig,
       state.setModel,
+      state.maybeAutoEnableCropper,
       state.updateAppState,
-    ]
-  )
+    ])
 
   const [open, setOpen] = useState(false)
   const [models, setModels] = useState<ModelEntry[]>([])
@@ -81,6 +81,8 @@ const ModelManager = () => {
     try {
       const newModel = await switchModel(name)
       setModel(newModel)
+      // Oversized image + a diffusion model → auto-enable & size the cropper.
+      maybeAutoEnableCropper()
       toast({ title: `Switched to ${newModel.name}` })
       setOpen(false)
     } catch (error: any) {

@@ -1,3 +1,5 @@
+import type { Settings } from "./states"
+
 export interface Filename {
   name: string
   height: number
@@ -124,6 +126,11 @@ export interface PatchEntry {
   extraMasks: HTMLImageElement[]
   batchId?: string
   label: string
+  // Snapshot of the diffusion settings (model included) used to produce this
+  // patch, so the history panel can inspect them and reapply them. `cropper`
+  // captures the cropper size, which lives outside `settings`.
+  settings: Settings
+  cropper: { width: number; height: number }
 }
 
 export interface RebaseEntry {
